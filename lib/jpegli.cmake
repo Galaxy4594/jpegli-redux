@@ -130,13 +130,14 @@ set_target_properties(jpeg PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/jpegli"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/jpegli")
 
-# Add a jpeg.version file as a version script to tag symbols with the
-# appropriate version number.
 set_target_properties(jpeg PROPERTIES
-  LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/jpegli/jpeg.version.${JPEGLI_LIBJPEG_LIBRARY_SOVERSION}
   WINDOWS_EXPORT_ALL_SYMBOLS ON)
-set_property(TARGET jpeg APPEND_STRING PROPERTY
-  LINK_FLAGS " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/jpegli/jpeg.version.${JPEGLI_LIBJPEG_LIBRARY_SOVERSION}")
+if (NOT WIN32)
+  set_target_properties(jpeg PROPERTIES
+    LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/jpegli/jpeg.version.${JPEGLI_LIBJPEG_LIBRARY_SOVERSION})
+  set_property(TARGET jpeg APPEND_STRING PROPERTY
+    LINK_FLAGS " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/jpegli/jpeg.version.${JPEGLI_LIBJPEG_LIBRARY_SOVERSION}")
+endif()
 
 if (JPEGLI_INSTALL_JPEGLI_LIBJPEG)
   install(TARGETS jpeg

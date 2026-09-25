@@ -977,7 +977,7 @@ void jpegli_enable_adaptive_quantization(j_compress_ptr cinfo, boolean value) {
 
 void jpegli_set_sharp_yuv(j_compress_ptr cinfo, boolean enable) {
   CheckState(cinfo, jpegli::kEncStart);
-  cinfo->master->use_sharpyuv = FROM_JXL_BOOL(enable);
+  cinfo->master->use_sharpyuv = FROM_JPEGLI_BOOL(enable);
 }
 
 void jpegli_simple_progression(j_compress_ptr cinfo) {
