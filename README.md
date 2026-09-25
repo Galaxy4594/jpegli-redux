@@ -1,45 +1,20 @@
-# Jpegli: an improved JPEG encoder and decoder implementation
+# Jpegli-redux: an improved JPEG encoder and decoder implementation
 
-This repository contains a JPEG encoder and decoder implementation that is
-API and ABI compatible with libjpeg62.
+This repository is a fork of Jpegli (a JPEG encoder and decoder implementation that is API and ABI compatible with libjpeg62).
+The goal of `jpegli-redux` is to merge in various pull requests fixing issues, add features for tuning the encoding/decoding process, and provide a repository for binary releases.
 
-## Encoder improvements
+## Planned Features and Fixes
 
-Improvements and new features used by the encoder include:
+The following features, fixes, and PRs from the original repository are planned to be merged:
 
-* Support for 16-bit unsigned and 32-bit floating point input buffers.
-
-* Color space conversions, chroma subsampling and DCT are all done in floating
-  point precision, the conversion to integers happens first when producing
-  the final quantized DCT coefficients.
-
-* The desired quality can be indicated by a distance parameter that is
-  analogous to the distance parameter of JPEG XL. The quantization tables
-  are chosen based on the distance and the chroma subsampling mode, with
-  different positions in the quantization matrix scaling differently, and the
-  red and blue chrominance channels have separate quantization tables.
-
-* Adaptive dead-zone quantization. On noisy parts of the image, quantization
-  thresholds for zero coefficients are higher than on smoother parts of the
-  image.
-
-* Support for more efficient compression of JPEGs with an ICC profile
-  representing the XYB colorspace. These JPEGs will not be converted to the
-  YCbCr colorspace, but specialized quantization tables will be chosen for
-  the original X, Y, B channels.
-
-## Decoder improvements
-
-* Support for 16-bit unsigned and 32-bit floating point output buffers.
-
-* Non-zero DCT coefficients are dequantized to the expectation value of their
-  respective quantization intervals assuming a Laplacian distribution of the
-  original unquantized DCT coefficients.
-
-* After dequantization, inverse DCT, chroma upsampling and color space
-  conversions are all done in floating point precision, the conversion to
-  integer samples happens only in the final output phase (unless output to
-  floating point was requested).
+*   **Prominent PRs to be merged:**
+    *   PR 112
+    *   PR 135
+    *   PR 136
+    *   PR 137
+    *   PR 190
+*   **Various new features** for tuning the encoding and decoding processes.
+*   **Prominent bug fixes** to improve stability and performance.
 
 ## Usage
 
