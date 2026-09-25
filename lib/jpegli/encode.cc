@@ -1285,7 +1285,6 @@ void jpegli_destroy_compress(j_compress_ptr cinfo) {
 }
 
 void jpegli_set_brown_boost(j_compress_ptr cinfo, float boost) {
-  if (cinfo && cinfo->master) {
-    cinfo->master->brown_boost = boost;
-  }
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->brown_boost = boost;
 }
