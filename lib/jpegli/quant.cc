@@ -571,6 +571,8 @@ float ScaleToDistance(float scale, int k) {
   return std::min<float>(2.0f * scale, mul * std::pow(scale, exp));
 }
 
+}  // namespace
+
 float QuantValsToDistance(j_compress_ptr cinfo) {
   jpeg_comp_master* m = cinfo->master;
   float global_scale = kGlobalScaleYCbCr;
@@ -618,6 +620,8 @@ float QuantValsToDistance(j_compress_ptr cinfo) {
   }
   return distance;
 }
+
+namespace {
 
 bool IsYUV420(j_compress_ptr cinfo) {
   return (cinfo->jpeg_color_space == JCS_YCbCr &&
@@ -697,7 +701,18 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
       } else {
         scale *= DistanceToLinearQuality(distances[quant_idx]);
       }
-      int qval = std::round(scale * base_qm[k]);
+      float base_val = base_qm[k];
+      // When color_shift_correction is enabled, linearly interpolate Cb's base
+      // quantization matrix towards Cr's matrix. This eliminates quantization
+      // asymmetry between Cb and Cr, preventing color shifting in fine yellow
+      // and warm details.
+      if (quant_idx == 1 && num_base_tables >= 3 &&
+          m->color_shift_correction > 0.0f) {
+        float boost = std::min(1.0f, std::max(0.0f, m->color_shift_correction));
+        float cr_val = base_quant_matrix[2][k];
+        base_val += boost * (cr_val - base_val);
+      }
+      int qval = std::round(scale * base_val);
       (*qtable)->quantval[k] = std::max(1, std::min(qval, quant_max));
     }
     (*qtable)->sent_table = FALSE;
@@ -732,7 +747,7 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
       }
     }
   }
-  if (m->use_adaptive_quantization) {
+  if (m->use_adaptive_quantization && m->adaptive_quantization_mode != 0) {
     for (int c = 0; c < cinfo->num_components; ++c) {
       for (int k = 0; k < DCTSIZE2; ++k) {
         m->zero_bias_mul[c][k] = k == 0 ? 0.0f : 0.5f;
@@ -740,19 +755,40 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
       }
     }
     if (cinfo->jpeg_color_space == JCS_YCbCr) {
-      float distance = QuantValsToDistance(cinfo);
+      float distance =
+          m->distance >= 0.0f ? m->distance : QuantValsToDistance(cinfo);
       static const float kDistHQ = 1.0f;
       static const float kDistLQ = 3.0f;
       float mix0 = (distance - kDistHQ) / (kDistLQ - kDistHQ);
       mix0 = std::max(0.0f, std::min(1.0f, mix0));
       float mix1 = 1.0f - mix0;
       for (int c = 0; c < cinfo->num_components; ++c) {
+        float correction = 1.0f;
+        if ((m->adaptive_quantization_mode == 2 ||
+             m->visual_energy_correction) &&
+            c < 3) {
+          static const float kVisualEnergyCorrection[3] = {1.15f, 0.50f, 0.75f};
+          correction = kVisualEnergyCorrection[c];
+        }
         for (int k = 0; k < DCTSIZE2; ++k) {
           float mul0 = kZeroBiasMulYCbCrLQ[c * DCTSIZE2 + k];
           float mul1 = kZeroBiasMulYCbCrHQ[c * DCTSIZE2 + k];
-          m->zero_bias_mul[c][k] = mix0 * mul0 + mix1 * mul1;
+          m->zero_bias_mul[c][k] = (mix0 * mul0 + mix1 * mul1) * correction;
           m->zero_bias_offset[c][k] =
               k == 0 ? kZeroBiasOffsetYCbCrDC[c] : kZeroBiasOffsetYCbCrAC[c];
+        }
+      }
+      // Linearly interpolate Cb's dead-zoning parameters (both zero_bias_mul
+      // and zero_bias_offset) towards Cr's parameters. At factor = 1.0, Cb
+      // shares the exact same dead-zoning threshold as Cr, removing the RDOQ
+      // zone discontinuity and color shift in fine yellow/warm textures.
+      if (m->color_shift_correction > 0.0f && cinfo->num_components >= 3) {
+        float boost = std::min(1.0f, std::max(0.0f, m->color_shift_correction));
+        for (int k = 0; k < DCTSIZE2; ++k) {
+          float cr_mul = m->zero_bias_mul[2][k];
+          float cr_offset = m->zero_bias_offset[2][k];
+          m->zero_bias_mul[1][k] += boost * (cr_mul - m->zero_bias_mul[1][k]);
+          m->zero_bias_offset[1][k] += boost * (cr_offset - m->zero_bias_offset[1][k]);
         }
       }
     }
@@ -761,6 +797,13 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
       for (int k = 0; k < DCTSIZE2; ++k) {
         m->zero_bias_offset[c][k] =
             k == 0 ? kZeroBiasOffsetYCbCrDC[c] : kZeroBiasOffsetYCbCrAC[c];
+      }
+    }
+    if (m->color_shift_correction > 0.0f && cinfo->num_components >= 3) {
+      float boost = std::min(1.0f, std::max(0.0f, m->color_shift_correction));
+      for (int k = 0; k < DCTSIZE2; ++k) {
+        float cr_offset = m->zero_bias_offset[2][k];
+        m->zero_bias_offset[1][k] += boost * (cr_offset - m->zero_bias_offset[1][k]);
       }
     }
   }

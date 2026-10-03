@@ -14,6 +14,7 @@
 #include "lib/base/types.h"
 #include "lib/jpegli/common.h"
 #include "lib/jpegli/common_internal.h"
+#include "lib/jpegli/quant.h"
 
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "lib/jpegli/adaptive_quantization.cc"
@@ -518,11 +519,28 @@ constexpr int kPreErosionBorder = 1;
 
 void ComputeAdaptiveQuantField(j_compress_ptr cinfo) {
   jpeg_comp_master* m = cinfo->master;
-  if (!m->use_adaptive_quantization) {
+  if (!m->use_adaptive_quantization || m->adaptive_quantization_mode == 0) {
     return;
   }
   int y_channel = cinfo->jpeg_color_space == JCS_RGB ? 1 : 0;
   jpeg_component_info* y_comp = &cinfo->comp_info[y_channel];
+  const size_t xsize_blocks = y_comp->width_in_blocks;
+  const size_t yb0 = m->next_iMCU_row * cinfo->max_v_samp_factor;
+
+  // Adaptive quantization scale: manual if specified (>= 0), or auto-calculated
+  // based on quality: distance 0 = no AQ, distance 1 = half strength, distance >= 2 = full AQ.
+  float aq_scale = m->aq_scale;
+  if (aq_scale < 0.0f) {
+    float distance =
+        m->distance >= 0.0f ? m->distance : QuantValsToDistance(cinfo);
+    aq_scale = std::min(1.0f, std::max(0.0f, distance * 0.5f));
+  }
+  if (aq_scale <= 0.0f) {
+    for (int y = 0; y < cinfo->max_v_samp_factor; ++y) {
+      m->quant_field.FillRow(yb0 + y, 0.0f, xsize_blocks);
+    }
+    return;
+  }
   int y_quant_01 = cinfo->quant_tbl_ptrs[y_comp->quant_tbl_no]->quantval[1];
   if (m->next_iMCU_row == 0) {
     m->input_buffer[y_channel].CopyRow(-1, 0, 1);
@@ -532,9 +550,7 @@ void ComputeAdaptiveQuantField(j_compress_ptr cinfo) {
     m->input_buffer[y_channel].CopyRow(last_row + 1, last_row, 1);
   }
   const RowBuffer<float>& input = m->input_buffer[y_channel];
-  const size_t xsize_blocks = y_comp->width_in_blocks;
   const size_t xsize = xsize_blocks * DCTSIZE;
-  const size_t yb0 = m->next_iMCU_row * cinfo->max_v_samp_factor;
   const size_t yblen = cinfo->max_v_samp_factor;
   size_t y0 = yb0 * DCTSIZE;
   size_t ylen = cinfo->max_v_samp_factor * DCTSIZE;
@@ -562,7 +578,7 @@ void ComputeAdaptiveQuantField(j_compress_ptr cinfo) {
   for (int y = 0; y < cinfo->max_v_samp_factor; ++y) {
     float* row = m->quant_field.Row(yb0 + y);
     for (size_t x = 0; x < xsize_blocks; ++x) {
-      row[x] = std::max(0.0f, (0.6f / row[x]) - 1.0f);
+      row[x] = std::max(0.0f, (0.6f / row[x]) - 1.0f) * aq_scale;
     }
   }
 }

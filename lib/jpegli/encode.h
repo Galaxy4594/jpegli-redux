@@ -140,13 +140,25 @@ void jpegli_set_cicp_transfer_function(j_compress_ptr cinfo, int code);
 void jpegli_set_input_format(j_compress_ptr cinfo, JpegliDataType data_type,
                              JpegliEndianness endianness);
 
+// Sets adaptive quantization mode:
+// 0 = off, 1 = old behavior, 2 = AQ + visual_energy_correction (default: 2)
+void jpegli_set_adaptive_quantization_mode(j_compress_ptr cinfo, int mode);
+
 // Sets whether or not the encoder uses adaptive quantization for creating more
 // zero coefficients based on the local properties of the image.
 // Enabled by default.
 void jpegli_enable_adaptive_quantization(j_compress_ptr cinfo, boolean value);
 
+// Sets adaptive quantization scale factor.
+// If negative (default: -1.0f), auto-calculated based on distance.
+void jpegli_set_adaptive_quantization_scale(j_compress_ptr cinfo, float scale);
+void jpegli_set_aq_scale(j_compress_ptr cinfo, float scale);
+
 // Enables linear-light sharp YUV downsampling.
 void jpegli_set_sharp_yuv(j_compress_ptr cinfo, boolean enable);
+
+// Enables visual energy correction to adjust chroma dead-zone quantization.
+void jpegli_enable_visual_energy_correction(j_compress_ptr cinfo, boolean value);
 
 // Sets the default progression parameters, where level 0 is sequential, and
 // greater level value means more progression steps. Default is 2.
@@ -158,6 +170,12 @@ void jpegli_set_progressive_level(j_compress_ptr cinfo, int level);
 // set of quantization tables and used different scaling parameters for DC and
 // AC coefficients. Must be called before jpegli_set_defaults().
 void jpegli_use_standard_quant_tables(j_compress_ptr cinfo);
+
+// Sets color shift correction factor in [0.0, 1.0].
+// Linearly aligns Cb quantization table and adaptive deadzoning to match Cr,
+// preventing color shifting and desaturation in fine yellow and warm-colored
+// details caused by asymmetric Cb/Cr quantization and RDOQ zones.
+void jpegli_set_color_shift_correction(j_compress_ptr cinfo, float factor);
 
 #ifdef __cplusplus
 }  // extern "C"

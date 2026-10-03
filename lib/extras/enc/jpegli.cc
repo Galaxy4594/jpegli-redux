@@ -459,10 +459,20 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
         return false;
       }
     }
-    jpegli_enable_adaptive_quantization(
-        &cinfo, TO_JPEGLI_BOOL(jpeg_settings.use_adaptive_quantization));
+    if (!jpeg_settings.use_adaptive_quantization ||
+        jpeg_settings.adaptive_quantization_mode == 0) {
+      jpegli_set_adaptive_quantization_mode(&cinfo, 0);
+    } else {
+      jpegli_set_adaptive_quantization_mode(
+          &cinfo, jpeg_settings.adaptive_quantization_mode);
+    }
+    jpegli_set_adaptive_quantization_scale(&cinfo, jpeg_settings.aq_scale);
     if (jpeg_settings.use_sharpyuv) {
       jpegli_set_sharp_yuv(&cinfo, TRUE);
+    }
+    if (jpeg_settings.color_shift_correction >= 0.0f) {
+      jpegli_set_color_shift_correction(&cinfo,
+                                        jpeg_settings.color_shift_correction);
     }
     if (jpeg_settings.psnr_target > 0.0) {
       jpegli_set_psnr(&cinfo, jpeg_settings.psnr_target,

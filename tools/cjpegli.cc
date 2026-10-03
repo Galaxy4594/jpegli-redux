@@ -80,6 +80,26 @@ struct Args {
                            "Use true linear-light sharp YUV downsampling for 4:2:0",
                            &settings.use_sharpyuv, &SetBooleanTrue, 1);
 
+    cmdline->AddOptionValue(
+        '\0', "aq_mode", "0|1|2",
+        "Adaptive quantization mode: 0=off, 1=old behavior, 2=AQ+visual_energy_correction (default: 2).",
+        &settings.adaptive_quantization_mode, &ParseSigned, 1);
+
+    cmdline->AddOptionValue(
+        '\0', "aq_scale", "FLOAT",
+        "Adaptive quantization scale factor. (If omitted or negative, auto).",
+        &settings.aq_scale, &ParseFloat, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "visual_energy_correction",
+        "Enable visual energy correction (AQ mode 2)",
+        &settings.visual_energy_correction, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "novisual_energy_correction",
+        "Disable visual energy correction (use AQ mode 1)",
+        &settings.visual_energy_correction, &SetBooleanFalse, 1);
+
     cmdline->AddOptionFlag(
         '\0', "std_quant",
         "Use quantization tables based on Annex K of the JPEG standard.",
@@ -108,6 +128,17 @@ struct Args {
     cmdline->AddOptionFlag('\0', "quiet", "Suppress informative output", &quiet,
                            &SetBooleanTrue, 1);
 
+    cmdline->AddOptionValue(
+        '\0', "color_shift_correction", "FLOAT",
+        "Color shift correction factor (0.0 to 1.0) to align Cb quantization\n"
+        "    and deadzoning with Cr. If negative or omitted, auto-detected.",
+        &color_shift_correction, &ParseFloat, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "nocolor_shift_correction",
+        "Disable color shift correction.",
+        &nocolor_shift_correction, &SetBooleanTrue, 1);
+
     cmdline->AddOptionFlag(
         'v', "verbose",
         "Verbose output; can be repeated, also applies to help (!).", &verbose,
@@ -123,6 +154,8 @@ struct Args {
   size_t num_reps = 1;
   bool quiet = false;
   bool verbose = false;
+  float color_shift_correction = -1.0f;
+  bool nocolor_shift_correction = false;
   // References (ids) of specific options to check if they were matched.
   CommandLineParser::OptionId opt_distance_id = -1;
   CommandLineParser::OptionId opt_quality_id = -1;
@@ -217,8 +250,56 @@ int CJpegliMain(int argc, const char* argv[]) {
             ppf.info.ysize, input_bytes.size());
   }
 
+  {
+    float correction = args.color_shift_correction;
+    if (args.nocolor_shift_correction) {
+      correction = 0.0f;
+    } else if (correction < 0.0f) {
+      // Auto-detect warm yellow pixels in the image.
+      // In warm tones, asymmetric Cb/Cr quantization and deadzoning causes 
+      // Cb coefficients to round to 0 earlier than Cr, shifting color hue
+      // and desaturating fine yellow details.
+      float warm_pixels = 0.0f;
+      float total_pixels = 0.0f;
+      for (const auto& img : ppf.frames) {
+        if (img.color.format.num_channels < 3 || args.settings.xyb) continue;
+        for (size_t y = 0; y < img.color.ysize; ++y) {
+          for (size_t x = 0; x < img.color.xsize; ++x) {
+            float r = img.color.GetPixelValue(y, x, 0);
+            float g = img.color.GetPixelValue(y, x, 1);
+            float b = img.color.GetPixelValue(y, x, 2);
+            if (r > g && g > b && r < 0.8f && r > 0.2f && (r - g) > 0.05f) {
+              warm_pixels += 1.0f;
+            }
+            total_pixels += 1.0f;
+          }
+        }
+      }
+      if (total_pixels > 0.0f) {
+        correction = std::min(1.0f, (warm_pixels / total_pixels) * 10.0f);
+      } else {
+        correction = 0.0f;
+      }
+    } else {
+      correction = std::min(1.0f, std::max(0.0f, correction));
+    }
+    args.settings.color_shift_correction = correction;
+    if (!args.quiet && correction > 0.0f) {
+      fprintf(stderr, "Color shift correction factor: %.3f\n", correction);
+    }
+  }
+
   if (!ValidateArgs(args) || !SetDistance(args, cmdline, &args.settings)) {
     return EXIT_FAILURE;
+  }
+
+  if (!args.settings.use_adaptive_quantization) {
+    args.settings.adaptive_quantization_mode = 0;
+  } else if (!args.settings.visual_energy_correction &&
+             args.settings.adaptive_quantization_mode == 2) {
+    args.settings.adaptive_quantization_mode = 1;
+  } else if (args.settings.adaptive_quantization_mode == 0) {
+    args.settings.use_adaptive_quantization = false;
   }
 
   if (!args.quiet) {
@@ -227,10 +308,14 @@ int CJpegliMain(int argc, const char* argv[]) {
         cmdline.GetOption(args.opt_quality_id)->matched()
             ? jpegli_quality_to_distance(s.quality)
             : s.distance;
-    fprintf(stderr, "Encoding [%s%s d%.3f%s %sAQ p%d %s]\n",
+    const char* aq_str = "noAQ";
+    if (s.use_adaptive_quantization && s.adaptive_quantization_mode > 0) {
+      aq_str = s.adaptive_quantization_mode == 2 ? "AQ2" : "AQ1";
+    }
+    fprintf(stderr, "Encoding [%s%s d%.3f%s %s p%d %s]\n",
             s.xyb ? "XYB" : "YUV", s.chroma_subsampling.c_str(),
             calculated_distance, s.use_std_quant_tables ? " StdQuant" : "",
-            s.use_adaptive_quantization ? "" : "no", s.progressive_level,
+            aq_str, s.progressive_level,
             s.optimize_coding ? "OPT" : "FIX");
   }
 

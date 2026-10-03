@@ -158,6 +158,7 @@ float ComputePSNR(j_compress_ptr cinfo, int sampling) {
 }
 
 void UpdateDistance(j_compress_ptr cinfo, float distance) {
+  cinfo->master->distance = distance;
   float distances[NUM_QUANT_TBLS] = {distance, distance, distance};
   SetQuantMatrices(cinfo, distances, /*add_two_chroma_tables=*/true);
 }

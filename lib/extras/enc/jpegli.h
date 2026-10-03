@@ -28,7 +28,11 @@ struct JpegSettings {
   size_t target_size = 0;
   float quality = 0.0f;
   float distance = 1.f;
+  int adaptive_quantization_mode = 2;
   bool use_adaptive_quantization = true;
+  bool visual_energy_correction = true;
+  // Adaptive quantization scale factor. If negative (default: -1.0f), auto.
+  float aq_scale = -1.0f;
   bool use_std_quant_tables = false;
   int progressive_level = 2;
   bool optimize_coding = true;
@@ -45,6 +49,9 @@ struct JpegSettings {
   // output. In xyb mode app_data must not contain an ICC profile, in this
   // case an additional APP2 ICC profile for the XYB colorspace will be emitted.
   std::vector<uint8_t> app_data;
+  // Factor in [0.0, 1.0] to align Cb quantization and dead-zoning with Cr,
+  // preventing color shifting in fine yellow and warm details.
+  float color_shift_correction = 1.0f;
 };
 
 Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,

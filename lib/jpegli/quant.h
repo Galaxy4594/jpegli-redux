@@ -22,6 +22,8 @@ enum QuantPass {
 
 void InitQuantizer(j_compress_ptr cinfo, QuantPass pass);
 
+float QuantValsToDistance(j_compress_ptr cinfo);
+
 }  // namespace jpegli
 
 #endif  // JPEGLI_LIB_JPEGLI_QUANT_H_

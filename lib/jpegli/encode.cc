@@ -713,7 +713,12 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->cicp_transfer_function = 2;  // unknown transfer function code
   cinfo->master->use_std_tables = false;
   cinfo->master->use_adaptive_quantization = true;
+  cinfo->master->adaptive_quantization_mode = 2;
   cinfo->master->use_sharpyuv = false;
+  cinfo->master->visual_energy_correction = true;
+  cinfo->master->color_shift_correction = 1.0f;
+  cinfo->master->aq_scale = -1.0f;
+  cinfo->master->distance = -1.0f;
   cinfo->master->progressive_level = jpegli::kDefaultProgressiveLevel;
   cinfo->master->data_type = JPEGLI_TYPE_UINT8;
   cinfo->master->endianness = JPEGLI_NATIVE_ENDIAN;
@@ -857,6 +862,7 @@ void jpegli_set_distance(j_compress_ptr cinfo, float distance,
                          boolean force_baseline) {
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->force_baseline = FROM_JPEGLI_BOOL(force_baseline);
+  cinfo->master->distance = distance;
   if (distance >= 1.9f && !(cinfo->master->xyb_mode) &&
       !cinfo->master->chroma_subsampling_set_by_cli) {
     // At medium qualities, 420 subsampling begins to outperform 444.
@@ -864,10 +870,6 @@ void jpegli_set_distance(j_compress_ptr cinfo, float distance,
     if (cinfo->jpeg_color_space == JCS_YCCK) {
       cinfo->comp_info[3].h_samp_factor = cinfo->comp_info[3].v_samp_factor = 2;
     }
-  }
-  // Disable adaptive quantization at high qualities.
-  if (distance <= 1.0f && !(cinfo->master->xyb_mode)) {
-    cinfo->master->use_adaptive_quantization = false;
   }
   // At quality 100 (distance 0) auto select RGB colorspace.
   if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB) {
@@ -898,6 +900,7 @@ void jpegli_set_quality(j_compress_ptr cinfo, int quality,
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->force_baseline = FROM_JPEGLI_BOOL(force_baseline);
   float distance = jpegli_quality_to_distance(quality);
+  cinfo->master->distance = distance;
   if (distance >= 1.9f && !(cinfo->master->xyb_mode) &&
       !cinfo->master->chroma_subsampling_set_by_cli) {
     // At medium qualities, 420 subsampling begins to outperform 444.
@@ -905,10 +908,6 @@ void jpegli_set_quality(j_compress_ptr cinfo, int quality,
     if (cinfo->jpeg_color_space == JCS_YCCK) {
       cinfo->comp_info[3].h_samp_factor = cinfo->comp_info[3].v_samp_factor = 2;
     }
-  }
-  // Disable adaptive quantization at high qualities.
-  if (distance <= 1.0f && !(cinfo->master->xyb_mode)) {
-    cinfo->master->use_adaptive_quantization = false;
   }
   // At quality 100 (distance 0) auto select RGB colorspace.
   if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB) {
@@ -923,6 +922,7 @@ void jpegli_set_linear_quality(j_compress_ptr cinfo, int scale_factor,
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->force_baseline = FROM_JPEGLI_BOOL(force_baseline);
   float distance = jpegli::LinearQualityToDistance(scale_factor);
+  cinfo->master->distance = distance;
   float distances[NUM_QUANT_TBLS] = {distance, distance, distance};
   jpegli::SetQuantMatrices(cinfo, distances, /*add_two_chroma_tables=*/false);
 }
@@ -970,14 +970,50 @@ void jpegli_add_quant_table(j_compress_ptr cinfo, int which_tbl,
   quant_table->sent_table = FALSE;
 }
 
+void jpegli_set_adaptive_quantization_mode(j_compress_ptr cinfo, int mode) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->adaptive_quantization_mode = mode;
+  cinfo->master->use_adaptive_quantization = (mode > 0);
+  cinfo->master->visual_energy_correction = (mode == 2);
+}
+
 void jpegli_enable_adaptive_quantization(j_compress_ptr cinfo, boolean value) {
   CheckState(cinfo, jpegli::kEncStart);
-  cinfo->master->use_adaptive_quantization = FROM_JPEGLI_BOOL(value);
+  if (!FROM_JPEGLI_BOOL(value)) {
+    cinfo->master->adaptive_quantization_mode = 0;
+    cinfo->master->use_adaptive_quantization = false;
+    cinfo->master->visual_energy_correction = false;
+  } else if (cinfo->master->adaptive_quantization_mode == 0) {
+    cinfo->master->adaptive_quantization_mode = 2;
+    cinfo->master->use_adaptive_quantization = true;
+    cinfo->master->visual_energy_correction = true;
+  }
+}
+
+void jpegli_set_adaptive_quantization_scale(j_compress_ptr cinfo, float scale) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->aq_scale = scale;
+}
+
+void jpegli_set_aq_scale(j_compress_ptr cinfo, float scale) {
+  jpegli_set_adaptive_quantization_scale(cinfo, scale);
 }
 
 void jpegli_set_sharp_yuv(j_compress_ptr cinfo, boolean enable) {
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->use_sharpyuv = FROM_JPEGLI_BOOL(enable);
+}
+
+void jpegli_enable_visual_energy_correction(j_compress_ptr cinfo, boolean value) {
+  CheckState(cinfo, jpegli::kEncStart);
+  if (FROM_JPEGLI_BOOL(value)) {
+    cinfo->master->adaptive_quantization_mode = 2;
+    cinfo->master->use_adaptive_quantization = true;
+    cinfo->master->visual_energy_correction = true;
+  } else if (cinfo->master->adaptive_quantization_mode == 2) {
+    cinfo->master->adaptive_quantization_mode = 1;
+    cinfo->master->visual_energy_correction = false;
+  }
 }
 
 void jpegli_simple_progression(j_compress_ptr cinfo) {
@@ -1348,4 +1384,9 @@ void jpegli_abort_compress(j_compress_ptr cinfo) {
 
 void jpegli_destroy_compress(j_compress_ptr cinfo) {
   jpegli_destroy(reinterpret_cast<j_common_ptr>(cinfo));
+}
+
+void jpegli_set_color_shift_correction(j_compress_ptr cinfo, float factor) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->color_shift_correction = factor;
 }

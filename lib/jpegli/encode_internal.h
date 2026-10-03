@@ -76,8 +76,11 @@ struct jpeg_comp_master {
   uint8_t cicp_transfer_function;
   bool use_std_tables;
   bool use_adaptive_quantization;
+  int adaptive_quantization_mode;
   bool chroma_subsampling_set_by_cli = false;
   bool use_sharpyuv;
+  bool visual_energy_correction;
+  float distance;
   int progressive_level;
   size_t xsize_blocks;
   size_t ysize_blocks;
@@ -141,6 +144,8 @@ struct jpeg_comp_master {
   float psnr_tolerance;
   float min_distance;
   float max_distance;
+  float color_shift_correction;
+  float aq_scale;
   jpegli::RowBuffer<float> sharpyuv_workspace[13];
 };
 
