@@ -441,8 +441,9 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
     }
     jpegli_enable_adaptive_quantization(
         &cinfo, TO_JPEGLI_BOOL(jpeg_settings.use_adaptive_quantization));
-    if (jpeg_settings.brown_boost > 0.0f) {
-      jpegli_set_brown_boost(&cinfo, jpeg_settings.brown_boost);
+    if (jpeg_settings.color_shift_correction > 0.0f) {
+      jpegli_set_color_shift_correction(&cinfo,
+                                        jpeg_settings.color_shift_correction);
     }
     if (jpeg_settings.psnr_target > 0.0) {
       jpegli_set_psnr(&cinfo, jpeg_settings.psnr_target,

@@ -104,6 +104,12 @@ struct Args {
     cmdline->AddOptionFlag('\0', "quiet", "Suppress informative output", &quiet,
                            &SetBooleanTrue, 1);
 
+    cmdline->AddOptionValue(
+        '\0', "color_shift_correction", "FLOAT",
+        "Color shift correction factor (0.0 to 1.0) to align Cb quantization\n"
+        "    and deadzoning with Cr. If negative or omitted, auto-detected.",
+        &color_shift_correction, &ParseFloat, 1);
+
     cmdline->AddOptionFlag(
         'v', "verbose",
         "Verbose output; can be repeated, also applies to help (!).", &verbose,
@@ -119,6 +125,7 @@ struct Args {
   size_t num_reps = 1;
   bool quiet = false;
   bool verbose = false;
+  float color_shift_correction = -1.0f;
   // References (ids) of specific options to check if they were matched.
   CommandLineParser::OptionId opt_distance_id = -1;
   CommandLineParser::OptionId opt_quality_id = -1;
@@ -214,29 +221,38 @@ int CJpegliMain(int argc, const char* argv[]) {
   }
 
   {
-    float brown_pixels = 0.0f;
-    float total_pixels = 0.0f;
-    for (const auto& img : ppf.frames) {
-      for (size_t y = 0; y < img.color.ysize; ++y) {
-        for (size_t x = 0; x < img.color.xsize; ++x) {
-          float r = img.color.GetPixelValue(y, x, 0);
-          float g = img.color.GetPixelValue(y, x, 1);
-          float b = img.color.GetPixelValue(y, x, 2);
-          if (r > g && g > b && r < 0.8f && r > 0.2f && (r - g) > 0.05f) {
-            brown_pixels += 1.0f;
+    float correction = args.color_shift_correction;
+    if (correction < 0.0f) {
+      // Auto-detect warm yellow / brown pixels in the image.
+      // In warm tones, asymmetric Cb/Cr quantization and deadzoning causes 
+      // Cb coefficients to round to 0 earlier than Cr, shifting color hue
+      // and desaturating fine yellow details.
+      float warm_pixels = 0.0f;
+      float total_pixels = 0.0f;
+      for (const auto& img : ppf.frames) {
+        for (size_t y = 0; y < img.color.ysize; ++y) {
+          for (size_t x = 0; x < img.color.xsize; ++x) {
+            float r = img.color.GetPixelValue(y, x, 0);
+            float g = img.color.GetPixelValue(y, x, 1);
+            float b = img.color.GetPixelValue(y, x, 2);
+            if (r > g && g > b && r < 0.8f && r > 0.2f && (r - g) > 0.05f) {
+              warm_pixels += 1.0f;
+            }
+            total_pixels += 1.0f;
           }
-          total_pixels += 1.0f;
         }
       }
+      if (total_pixels > 0.0f) {
+        correction = std::min(1.0f, (warm_pixels / total_pixels) * 10.0f);
+      } else {
+        correction = 0.0f;
+      }
+    } else {
+      correction = std::min(1.0f, std::max(0.0f, correction));
     }
-    float brown_boost = 0.0f;
-    if (total_pixels > 0) {
-      brown_boost = brown_pixels / total_pixels;
-      brown_boost = std::min(1.0f, brown_boost * 10.0f); 
-    }
-    args.settings.brown_boost = brown_boost;
-    if (!args.quiet) {
-      fprintf(stderr, "Brown/Dark-Yellow boost factor: %.3f\n", brown_boost);
+    args.settings.color_shift_correction = correction;
+    if (!args.quiet && correction > 0.0f) {
+      fprintf(stderr, "Color shift correction factor: %.3f\n", correction);
     }
   }
 

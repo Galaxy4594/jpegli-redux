@@ -693,6 +693,7 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->cicp_transfer_function = 2;  // unknown transfer function code
   cinfo->master->use_std_tables = false;
   cinfo->master->use_adaptive_quantization = true;
+  cinfo->master->color_shift_correction = 0.0f;
   cinfo->master->progressive_level = jpegli::kDefaultProgressiveLevel;
   cinfo->master->data_type = JPEGLI_TYPE_UINT8;
   cinfo->master->endianness = JPEGLI_NATIVE_ENDIAN;
@@ -1284,7 +1285,11 @@ void jpegli_destroy_compress(j_compress_ptr cinfo) {
   jpegli_destroy(reinterpret_cast<j_common_ptr>(cinfo));
 }
 
-void jpegli_set_brown_boost(j_compress_ptr cinfo, float boost) {
+void jpegli_set_color_shift_correction(j_compress_ptr cinfo, float factor) {
   CheckState(cinfo, jpegli::kEncStart);
-  cinfo->master->brown_boost = boost;
+  cinfo->master->color_shift_correction = factor;
+}
+
+void jpegli_set_brown_boost(j_compress_ptr cinfo, float boost) {
+  jpegli_set_color_shift_correction(cinfo, boost);
 }

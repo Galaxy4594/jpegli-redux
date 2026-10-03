@@ -156,6 +156,13 @@ void jpegli_set_progressive_level(j_compress_ptr cinfo, int level);
 // AC coefficients. Must be called before jpegli_set_defaults().
 void jpegli_use_standard_quant_tables(j_compress_ptr cinfo);
 
+// Sets color shift correction factor in [0.0, 1.0].
+// Linearly aligns Cb quantization table and adaptive deadzoning to match Cr,
+// preventing color shifting and desaturation in fine yellow and warm-colored
+// details caused by asymmetric Cb/Cr quantization and RDOQ zones.
+void jpegli_set_color_shift_correction(j_compress_ptr cinfo, float factor);
+
+// Deprecated alias for jpegli_set_color_shift_correction.
 void jpegli_set_brown_boost(j_compress_ptr cinfo, float boost);
 
 #ifdef __cplusplus

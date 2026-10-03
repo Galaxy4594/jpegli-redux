@@ -138,7 +138,7 @@ struct jpeg_comp_master {
   float psnr_tolerance;
   float min_distance;
   float max_distance;
-  float brown_boost;
+  float color_shift_correction;
 };
 
 #endif  // JPEGLI_LIB_JPEGLI_ENCODE_INTERNAL_H_
