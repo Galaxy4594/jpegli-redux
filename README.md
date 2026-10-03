@@ -12,6 +12,7 @@ This repository includes several improvements and fixes merged from upstream pul
 *   **Default to 444 and fix XYB Subsampling** by jonnyawsom3 ([PR 136](https://github.com/google/jpegli/pull/136)): Default to 4:4:4 chroma subsampling and correct subsampling handling for XYB color space.
 *   **Change settings based on distance** by jonnyawsom3 ([PR 137](https://github.com/google/jpegli/pull/137)): Dynamically select subsampling and disable adaptive quantization at high qualities, and auto-select RGB at quality 100.
 *   **Added sharpyuv encoding** by Galaxy4594 ([PR 190](https://github.com/google/jpegli/pull/190)): Added Sharp YUV chroma downsampling for 4:2:0 subsampling.
+*   **Allow empty DHT marker** by kleisauke ([PR 222](https://github.com/google/jpegli/pull/222)): Allow encoding and decoding empty DHT markers found in real-world progressive JPEGs.
 
 ## Usage
 
