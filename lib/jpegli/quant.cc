@@ -699,8 +699,9 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
       }
       float base_val = base_qm[k];
       if (quant_idx == 1 && num_base_tables >= 3 && m->brown_boost > 0.0f) {
+        float boost = std::min(1.0f, std::max(0.0f, m->brown_boost));
         float cr_val = base_quant_matrix[2][k];
-        base_val += m->brown_boost * (cr_val - base_val);
+        base_val += boost * (cr_val - base_val);
       }
       int qval = std::round(scale * base_val);
       (*qtable)->quantval[k] = std::max(1, std::min(qval, quant_max));
@@ -738,8 +739,6 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
     }
   }
   
-  fprintf(stderr, "[DEBUG] InitQuantizer: brown_boost value passed to core is %.3f\n", m->brown_boost);
-  
   if (m->use_adaptive_quantization) {
     for (int c = 0; c < cinfo->num_components; ++c) {
       for (int k = 0; k < DCTSIZE2; ++k) {
@@ -758,22 +757,18 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
         for (int k = 0; k < DCTSIZE2; ++k) {
           float mul0 = kZeroBiasMulYCbCrLQ[c * DCTSIZE2 + k];
           float mul1 = kZeroBiasMulYCbCrHQ[c * DCTSIZE2 + k];
-          if (c == 1 && m->brown_boost > 0.0f) {
-            float mul0_cr = kZeroBiasMulYCbCrLQ[2 * DCTSIZE2 + k];
-            float mul1_cr = kZeroBiasMulYCbCrHQ[2 * DCTSIZE2 + k];
-            mul0 += m->brown_boost * (mul0_cr - mul0);
-            mul1 += m->brown_boost * (mul1_cr - mul1);
-          }
           m->zero_bias_mul[c][k] = mix0 * mul0 + mix1 * mul1;
           m->zero_bias_offset[c][k] =
               k == 0 ? kZeroBiasOffsetYCbCrDC[c] : kZeroBiasOffsetYCbCrAC[c];
-          
-          if ((c == 1 || c == 2) && m->brown_boost > 0.0f) {
-            float std_mul = k == 0 ? 0.0f : 0.5f;
-            float std_offset = k == 0 ? 0.0f : 0.1f;
-            m->zero_bias_mul[c][k] += m->brown_boost * (std_mul - m->zero_bias_mul[c][k]);
-            m->zero_bias_offset[c][k] += m->brown_boost * (std_offset - m->zero_bias_offset[c][k]);
-          }
+        }
+      }
+      if (m->brown_boost > 0.0f && cinfo->num_components >= 3) {
+        float boost = std::min(1.0f, std::max(0.0f, m->brown_boost));
+        for (int k = 0; k < DCTSIZE2; ++k) {
+          float cr_mul = m->zero_bias_mul[2][k];
+          float cr_offset = m->zero_bias_offset[2][k];
+          m->zero_bias_mul[1][k] += boost * (cr_mul - m->zero_bias_mul[1][k]);
+          m->zero_bias_offset[1][k] += boost * (cr_offset - m->zero_bias_offset[1][k]);
         }
       }
     }
@@ -782,11 +777,13 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
       for (int k = 0; k < DCTSIZE2; ++k) {
         m->zero_bias_offset[c][k] =
             k == 0 ? kZeroBiasOffsetYCbCrDC[c] : kZeroBiasOffsetYCbCrAC[c];
-            
-        if ((c == 1) && m->brown_boost > 0.0f) {
-          float std_offset = k == 0 ? 0.0f : 0.5f;
-          m->zero_bias_offset[c][k] += m->brown_boost * (std_offset - m->zero_bias_offset[c][k]);
-        }
+      }
+    }
+    if (m->brown_boost > 0.0f && cinfo->num_components >= 3) {
+      float boost = std::min(1.0f, std::max(0.0f, m->brown_boost));
+      for (int k = 0; k < DCTSIZE2; ++k) {
+        float cr_offset = m->zero_bias_offset[2][k];
+        m->zero_bias_offset[1][k] += boost * (cr_offset - m->zero_bias_offset[1][k]);
       }
     }
   }
