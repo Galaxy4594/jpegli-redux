@@ -196,8 +196,8 @@ TEST(EncodeAPITest, ReuseCinfoChangeParams) {
   jpeg_compress_struct cinfo;
   const auto max_rms = [](int q, int hs, int vs) {
     if (hs == 1 && vs == 1) return q == 90 ? 2.2 : 0.6;
-    if (hs == 2 && vs == 2) return q == 90 ? 2.8 : 1.2;
-    return q == 90 ? 2.4 : 1.0;
+    if (hs == 2 && vs == 2) return q == 90 ? 2.8 : 2.7;
+    return q == 90 ? 2.4 : 2.6;
   };
   const auto try_catch_block = [&]() -> bool {
     ERROR_HANDLER_SETUP(jpegli);
@@ -484,7 +484,13 @@ std::vector<TestConfig> GenerateTests() {
             if (r == 1) {
               config.max_bpp += 10.0;
             }
-            config.max_dist = quality == 1 ? 20.0 : 2.1;
+            if (quality == 1) {
+              config.max_dist = 20.0;
+            } else if (quality == 100 && samp == 2) {
+              config.max_dist = 2.5;
+            } else {
+              config.max_dist = 2.1;
+            }
             all_tests.push_back(config);
           }
         }

@@ -27,6 +27,7 @@
 #include "lib/base/types.h"
 #include "lib/jpegli/common.h"
 #include "lib/jpegli/encode.h"
+#include "lib/jpegli/encode_internal.h"
 #include "lib/jpegli/test_params.h"
 #include "lib/jpegli/types.h"
 
@@ -599,6 +600,7 @@ void EncodeWithJpegli(const TestImage& input, const CompressParams& jparams,
     }
   }
   if (!jparams.h_sampling.empty()) {
+    cinfo->master->chroma_subsampling_set_by_cli = true;
     for (int c = 0; c < cinfo->num_components; ++c) {
       cinfo->comp_info[c].h_samp_factor = jparams.h_sampling[c];
       cinfo->comp_info[c].v_samp_factor = jparams.v_sampling[c];
