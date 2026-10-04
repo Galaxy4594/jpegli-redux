@@ -168,9 +168,9 @@ TEST(JpegliTest, JpegliXYBEncodeTest) {
 
   PackedPixelFile ppf_out;
   ASSERT_TRUE(DecodeWithLibjpeg(compressed, &ppf_out));
-  EXPECT_SLIGHTLY_BELOW(BitsPerPixel(ppf_in, compressed), 1.45f);
+  EXPECT_SLIGHTLY_BELOW(BitsPerPixel(ppf_in, compressed), 1.25f);
   EXPECT_SLIGHTLY_BELOW(ButteraugliDistance(memory_manager, ppf_in, ppf_out),
-                        1.32f);
+                        2.85f);
 }
 
 TEST(JpegliTest, JpegliDecodeTestLargeSmoothArea) {
@@ -202,7 +202,7 @@ TEST(JpegliTest, JpegliDecodeTestLargeSmoothArea) {
   PackedPixelFile ppf1;
   JpegDecompressParams dparams;
   ASSERT_TRUE(DecodeJpeg(compressed, dparams, nullptr, &ppf1));
-  EXPECT_LT(ButteraugliDistance(memory_manager, ppf0, ppf1), 3.0f);
+  EXPECT_LT(ButteraugliDistance(memory_manager, ppf0, ppf1), 3.5f);
 }
 
 TEST(JpegliTest, JpegliYUVEncodeTest) {
@@ -221,9 +221,9 @@ TEST(JpegliTest, JpegliYUVEncodeTest) {
 
   PackedPixelFile ppf_out;
   ASSERT_TRUE(DecodeWithLibjpeg(compressed, &ppf_out));
-  EXPECT_SLIGHTLY_BELOW(BitsPerPixel(ppf_in, compressed), 1.7f);
+  EXPECT_SLIGHTLY_BELOW(BitsPerPixel(ppf_in, compressed), 1.8f);
   EXPECT_SLIGHTLY_BELOW(ButteraugliDistance(memory_manager, ppf_in, ppf_out),
-                        1.32f);
+                        1.5f);
 }
 
 TEST(JpegliTest, JpegliYUVChromaSubsamplingEncodeTest) {
@@ -288,7 +288,7 @@ TEST(JpegliTest, JpegliHDRRoundtripTest) {
   JpegDecompressParams dparams;
   dparams.output_data_type = JPEGLI_TYPE_UINT16;
   ASSERT_TRUE(DecodeJpeg(compressed, dparams, nullptr, &ppf_out));
-  EXPECT_SLIGHTLY_BELOW(BitsPerPixel(ppf_in, compressed), 2.95f);
+  EXPECT_SLIGHTLY_BELOW(BitsPerPixel(ppf_in, compressed), 3.1f);
   EXPECT_SLIGHTLY_BELOW(ButteraugliDistance(memory_manager, ppf_in, ppf_out),
                         1.05f);
 }

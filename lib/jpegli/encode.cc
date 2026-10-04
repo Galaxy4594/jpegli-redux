@@ -867,22 +867,9 @@ static void ApplyDistanceHeuristics(j_compress_ptr cinfo, float distance) {
       cinfo->comp_info[3].h_samp_factor = cinfo->comp_info[3].v_samp_factor = 2;
     }
   }
-  // At quality 100 (distance 0) auto select RGB colorspace without resetting comp_info.
-  if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB &&
-      cinfo->jpeg_color_space != JCS_RGB) {
-    cinfo->jpeg_color_space = JCS_RGB;
-    cinfo->comp_info[0].component_id = 'R';
-    cinfo->comp_info[1].component_id = 'G';
-    cinfo->comp_info[2].component_id = 'B';
-    if (cinfo->master->xyb_mode) {
-      cinfo->comp_info[1].quant_tbl_no = 1;
-      cinfo->comp_info[2].quant_tbl_no = 2;
-    } else {
-      cinfo->comp_info[1].quant_tbl_no = 0;
-      cinfo->comp_info[2].quant_tbl_no = 0;
-      cinfo->comp_info[1].dc_tbl_no = cinfo->comp_info[1].ac_tbl_no = 0;
-      cinfo->comp_info[2].dc_tbl_no = cinfo->comp_info[2].ac_tbl_no = 0;
-    }
+  // At quality 100 (distance 0) auto select RGB colorspace.
+  if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB) {
+    jpegli_set_colorspace(cinfo, JCS_RGB);
   }
 }
 void jpegli_set_distance(j_compress_ptr cinfo, float distance,

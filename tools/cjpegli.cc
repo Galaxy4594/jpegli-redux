@@ -135,11 +135,6 @@ struct Args {
         &color_shift_correction, &ParseFloat, 1);
 
     cmdline->AddOptionFlag(
-        '\0', "nocolor_shift_correction",
-        "Disable color shift correction.",
-        &nocolor_shift_correction, &SetBooleanTrue, 1);
-
-    cmdline->AddOptionFlag(
         'v', "verbose",
         "Verbose output; can be repeated, also applies to help (!).", &verbose,
         &SetBooleanTrue);
@@ -155,7 +150,6 @@ struct Args {
   bool quiet = false;
   bool verbose = false;
   float color_shift_correction = -1.0f;
-  bool nocolor_shift_correction = false;
   // References (ids) of specific options to check if they were matched.
   CommandLineParser::OptionId opt_distance_id = -1;
   CommandLineParser::OptionId opt_quality_id = -1;
@@ -252,9 +246,7 @@ int CJpegliMain(int argc, const char* argv[]) {
 
   {
     float correction = args.color_shift_correction;
-    if (args.nocolor_shift_correction) {
-      correction = 0.0f;
-    } else if (correction < 0.0f) {
+    if (correction < 0.0f) {
       // Auto-detect warm yellow pixels in the image.
       // In warm tones, asymmetric Cb/Cr quantization and deadzoning causes 
       // Cb coefficients to round to 0 earlier than Cr, shifting color hue

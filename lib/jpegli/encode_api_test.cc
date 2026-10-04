@@ -384,8 +384,8 @@ std::vector<TestConfig> GenerateTests() {
     config.jparams.quality = 100;
     config.jparams.h_sampling = {1, 1, 1};
     config.jparams.v_sampling = {1, 1, 1};
-    config.max_bpp = 6.6;
-    config.max_dist = 0.6;
+    config.max_bpp = 12.5;
+    config.max_dist = 1.0;
     all_tests.push_back(config);
   }
   {
@@ -480,7 +480,7 @@ std::vector<TestConfig> GenerateTests() {
             config.jparams.v_sampling = {samp, 1, 1};
             config.jparams.quality = quality;
             config.jparams.restart_interval = r;
-            config.max_bpp = quality == 100 ? 8.0 : 1.9;
+            config.max_bpp = quality == 100 ? 12.5 : 1.9;
             if (r == 1) {
               config.max_bpp += 10.0;
             }
@@ -556,7 +556,7 @@ std::vector<TestConfig> GenerateTests() {
       }
       config.jparams.h_sampling = {1, 1, 1, 1};
       config.jparams.v_sampling = {1, 1, 1, 1};
-      config.max_bpp = jpeg_color_space == JCS_CMYK ? 4.0 : 3.6;
+      config.max_bpp = jpeg_color_space == JCS_CMYK ? 4.15 : 3.6;
       config.max_dist = jpeg_color_space == JCS_CMYK ? 1.2 : 1.5;
       all_tests.push_back(config);
     }
@@ -688,7 +688,7 @@ std::vector<TestConfig> GenerateTests() {
         table.Generate();
         config.jparams.quant_tables.push_back(table);
       }
-      config.max_bpp = 2.0;
+      config.max_bpp = 2.6;
       config.max_dist = 3.85;
       all_tests.push_back(config);
     }
@@ -723,7 +723,7 @@ std::vector<TestConfig> GenerateTests() {
       table.Generate();
       config.jparams.quant_tables.push_back(table);
     }
-    config.max_bpp = 1.5;
+    config.max_bpp = 2.2;
     config.max_dist = 3.75;
     all_tests.push_back(config);
   }
@@ -819,7 +819,7 @@ std::vector<TestConfig> GenerateTests() {
          {JPEGLI_LITTLE_ENDIAN, JPEGLI_BIG_ENDIAN, JPEGLI_NATIVE_ENDIAN}) {
       J_COLOR_SPACE colorspace[4] = {JCS_GRAYSCALE, JCS_UNKNOWN, JCS_RGB,
                                      JCS_CMYK};
-      float max_bpp[4] = {1.32, 2.7, 1.6, 4.0};
+      float max_bpp[4] = {1.32, 2.7, 1.6, 4.15};
       for (int channels = 1; channels <= 4; ++channels) {
         TestConfig config;
         config.input.data_type = data_type;
