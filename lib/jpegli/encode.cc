@@ -858,11 +858,7 @@ void jpegli_set_colorspace(j_compress_ptr cinfo, J_COLOR_SPACE colorspace) {
   }
 }
 
-void jpegli_set_distance(j_compress_ptr cinfo, float distance,
-                         boolean force_baseline) {
-  CheckState(cinfo, jpegli::kEncStart);
-  cinfo->master->force_baseline = FROM_JPEGLI_BOOL(force_baseline);
-  cinfo->master->distance = distance;
+static void ApplyDistanceHeuristics(j_compress_ptr cinfo, float distance) {
   if (distance >= 1.9f && !(cinfo->master->xyb_mode) &&
       !cinfo->master->chroma_subsampling_set_by_cli) {
     // At medium qualities, 420 subsampling begins to outperform 444.
@@ -871,10 +867,30 @@ void jpegli_set_distance(j_compress_ptr cinfo, float distance,
       cinfo->comp_info[3].h_samp_factor = cinfo->comp_info[3].v_samp_factor = 2;
     }
   }
-  // At quality 100 (distance 0) auto select RGB colorspace.
-  if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB) {
-    jpegli_set_colorspace(cinfo, JCS_RGB);
+  // At quality 100 (distance 0) auto select RGB colorspace without resetting comp_info.
+  if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB &&
+      cinfo->jpeg_color_space != JCS_RGB) {
+    cinfo->jpeg_color_space = JCS_RGB;
+    cinfo->comp_info[0].component_id = 'R';
+    cinfo->comp_info[1].component_id = 'G';
+    cinfo->comp_info[2].component_id = 'B';
+    if (cinfo->master->xyb_mode) {
+      cinfo->comp_info[1].quant_tbl_no = 1;
+      cinfo->comp_info[2].quant_tbl_no = 2;
+    } else {
+      cinfo->comp_info[1].quant_tbl_no = 0;
+      cinfo->comp_info[2].quant_tbl_no = 0;
+      cinfo->comp_info[1].dc_tbl_no = cinfo->comp_info[1].ac_tbl_no = 0;
+      cinfo->comp_info[2].dc_tbl_no = cinfo->comp_info[2].ac_tbl_no = 0;
+    }
   }
+}
+void jpegli_set_distance(j_compress_ptr cinfo, float distance,
+                         boolean force_baseline) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->force_baseline = FROM_JPEGLI_BOOL(force_baseline);
+  cinfo->master->distance = distance;
+  ApplyDistanceHeuristics(cinfo, distance);
   float distances[NUM_QUANT_TBLS] = {distance, distance, distance};
   jpegli::SetQuantMatrices(cinfo, distances, /*add_two_chroma_tables=*/true);
 }
@@ -901,18 +917,7 @@ void jpegli_set_quality(j_compress_ptr cinfo, int quality,
   cinfo->master->force_baseline = FROM_JPEGLI_BOOL(force_baseline);
   float distance = jpegli_quality_to_distance(quality);
   cinfo->master->distance = distance;
-  if (distance >= 1.9f && !(cinfo->master->xyb_mode) &&
-      !cinfo->master->chroma_subsampling_set_by_cli) {
-    // At medium qualities, 420 subsampling begins to outperform 444.
-    cinfo->comp_info[0].h_samp_factor = cinfo->comp_info[0].v_samp_factor = 2;
-    if (cinfo->jpeg_color_space == JCS_YCCK) {
-      cinfo->comp_info[3].h_samp_factor = cinfo->comp_info[3].v_samp_factor = 2;
-    }
-  }
-  // At quality 100 (distance 0) auto select RGB colorspace.
-  if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB) {
-    jpegli_set_colorspace(cinfo, JCS_RGB);
-  }
+  ApplyDistanceHeuristics(cinfo, distance);
   float distances[NUM_QUANT_TBLS] = {distance, distance, distance};
   jpegli::SetQuantMatrices(cinfo, distances, /*add_two_chroma_tables=*/false);
 }
@@ -1251,7 +1256,7 @@ JDIMENSION jpegli_write_scanlines(j_compress_ptr cinfo, JSAMPARRAY scanlines,
         float* rgb_row = m->input_rgb[c].Row(row_idx);
         memcpy(rgb_row, rows[c], img_w * sizeof(float));
         float last = rgb_row[img_w - 1];
-        for (size_t x = img_w; x <= pad_w; ++x) rgb_row[x] = last;
+        for (size_t x = img_w; x < pad_w; ++x) rgb_row[x] = last;
       }
     }
     (*m->color_transform)(rows, cinfo->image_width);

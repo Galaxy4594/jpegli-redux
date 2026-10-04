@@ -115,64 +115,64 @@ HWY_INLINE V FastPowf(const DF df, V x, float power) {
 
 // Highway SIMD gamma helpers using fast polynomial approximations
 template <class D, class V>
-HWY_INLINE V GammaToLinear_SIMD(D d, V v) {
-  auto v_zero = Set(d, 0.0f);
-  auto v_max = Set(d, 255.0f);
-  auto n = Mul(Min(Max(v, v_zero), v_max), Set(d, 1.0f / 255.0f));
-  auto is_low = Le(n, Set(d, 0.04045f));
-  auto low_val = Mul(n, Set(d, 1.0f / 12.92f));
+HWY_INLINE V GammaToLinear_SIMD(D df, V v) {
+  auto v_zero = Set(df, 0.0f);
+  auto v_max = Set(df, 255.0f);
+  auto n = Mul(Min(Max(v, v_zero), v_max), Set(df, 1.0f / 255.0f));
+  auto is_low = Le(n, Set(df, 0.04045f));
+  auto low_val = Mul(n, Set(df, 1.0f / 12.92f));
   // High path: ((n + 0.055) / 1.055) ^ 2.4
-  auto base = Mul(Add(n, Set(d, 0.055f)), Set(d, 1.0f / 1.055f));
-  base = Max(base, Set(d, 1e-6f));
-  auto high_val = FastPowf(d, base, 2.4f);
+  auto base = Mul(Add(n, Set(df, 0.055f)), Set(df, 1.0f / 1.055f));
+  base = Max(base, Set(df, 1e-6f));
+  auto high_val = FastPowf(df, base, 2.4f);
   return IfThenElse(is_low, low_val, high_val);
 }
 
 template <class D, class V>
-HWY_INLINE V LinearToGamma_SIMD(D d, V v) {
-  v = Max(v, Set(d, 0.0f));
-  auto is_low = Le(v, Set(d, 0.0031308f));
-  auto low_val = Mul(v, Set(d, 12.92f * 255.0f));
-  auto v_safe = Max(v, Set(d, 1e-6f));
-  auto p = FastPowf(d, v_safe, 1.0f / 2.4f);
+HWY_INLINE V LinearToGamma_SIMD(D df, V v) {
+  v = Max(v, Set(df, 0.0f));
+  auto is_low = Le(v, Set(df, 0.0031308f));
+  auto low_val = Mul(v, Set(df, 12.92f * 255.0f));
+  auto v_safe = Max(v, Set(df, 1e-6f));
+  auto p = FastPowf(df, v_safe, 1.0f / 2.4f);
   auto high_val =
-      Mul(Sub(Mul(p, Set(d, 1.055f)), Set(d, 0.055f)), Set(d, 255.0f));
+      Mul(Sub(Mul(p, Set(df, 1.055f)), Set(df, 0.055f)), Set(df, 255.0f));
   return IfThenElse(is_low, low_val, high_val);
 }
 
 template <class D, class V>
-HWY_INLINE void YCbCrToRGB_SIMD(D d, V y, V cb, V cr, V* r, V* g, V* b) {
-  const auto v128 = Set(d, 128.0f);
+HWY_INLINE void YCbCrToRGB_SIMD(D df, V y, V cb, V cr, V* r, V* g, V* b) {
+  const auto v128 = Set(df, 128.0f);
   cb = Sub(cb, v128);
   cr = Sub(cr, v128);
-  const auto kCrR = Set(d, 1.402f);
-  const auto kCbG = Set(d, -0.114f * 1.772f / 0.587f);
-  const auto kCrG = Set(d, -0.299f * 1.402f / 0.587f);
-  const auto kCbB = Set(d, 1.772f);
+  const auto kCrR = Set(df, 1.402f);
+  const auto kCbG = Set(df, -0.114f * 1.772f / 0.587f);
+  const auto kCrG = Set(df, -0.299f * 1.402f / 0.587f);
+  const auto kCbB = Set(df, 1.772f);
   *r = MulAdd(cr, kCrR, y);
   *g = MulAdd(cb, kCbG, MulAdd(cr, kCrG, y));
   *b = MulAdd(cb, kCbB, y);
 }
 
 template <class D, class V>
-HWY_INLINE V TempLuma_SIMD(D d, V r, V g, V b) {
+HWY_INLINE V TempLuma_SIMD(D df, V r, V g, V b) {
   // using bt 709 values (0.2126f, 0.7152f, 0.0722f) may be more perceptually
   // accurate, but it needs more visual testing.
-  const auto kR = Set(d, 0.299f);
-  const auto kG = Set(d, 0.587f);
-  const auto kB = Set(d, 0.114f);
+  const auto kR = Set(df, 0.299f);
+  const auto kG = Set(df, 0.587f);
+  const auto kB = Set(df, 0.114f);
   return MulAdd(kR, r, MulAdd(kG, g, Mul(kB, b)));
 }
 
 // Vectorized RGBToCbCr: computes Cb, Cr from gamma-space R, G, B vectors.
 template <class D, class V>
-HWY_INLINE void RGBToCbCr_SIMD(D d, V r, V g, V b, V* cb, V* cr) {
-  const auto kR = Set(d, 0.299f);
-  const auto kG = Set(d, 0.587f);
-  const auto kB = Set(d, 0.114f);
-  const auto kNormR = Set(d, 1.0f / (0.701f + 0.587f + 0.114f));
-  const auto kNormB = Set(d, 1.0f / (0.299f + 0.587f + 0.886f));
-  const auto v128 = Set(d, 128.0f);
+HWY_INLINE void RGBToCbCr_SIMD(D df, V r, V g, V b, V* cb, V* cr) {
+  const auto kR = Set(df, 0.299f);
+  const auto kG = Set(df, 0.587f);
+  const auto kB = Set(df, 0.114f);
+  const auto kNormR = Set(df, 1.0f / (0.701f + 0.587f + 0.114f));
+  const auto kNormB = Set(df, 1.0f / (0.299f + 0.587f + 0.886f));
+  const auto v128 = Set(df, 128.0f);
 
   auto y_base = MulAdd(kR, r, MulAdd(kG, g, Mul(kB, b)));
   // cb = (b - y_base) * kNormB + 128

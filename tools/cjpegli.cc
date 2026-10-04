@@ -263,8 +263,10 @@ int CJpegliMain(int argc, const char* argv[]) {
       float total_pixels = 0.0f;
       for (const auto& img : ppf.frames) {
         if (img.color.format.num_channels < 3 || args.settings.xyb) continue;
-        for (size_t y = 0; y < img.color.ysize; ++y) {
-          for (size_t x = 0; x < img.color.xsize; ++x) {
+        size_t stride_y = std::max<size_t>(1, img.color.ysize / 128);
+        size_t stride_x = std::max<size_t>(1, img.color.xsize / 128);
+        for (size_t y = 0; y < img.color.ysize; y += stride_y) {
+          for (size_t x = 0; x < img.color.xsize; x += stride_x) {
             float r = img.color.GetPixelValue(y, x, 0);
             float g = img.color.GetPixelValue(y, x, 1);
             float b = img.color.GetPixelValue(y, x, 2);

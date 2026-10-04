@@ -156,7 +156,7 @@ jobs:
     - name: Set git safe dir
       run: |
         export GIT_CEILING_DIRECTORIES=/__w # only work before git v2.35.2
-        git config --global --add safe.directory /__w/jpegli/jpegli
+        git config --global --add safe.directory '*'
 
     - name: Checkout the source
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -171,6 +171,7 @@ jobs:
       if: github.event_name != 'release'
       shell: 'bash'
       run: |
+        git config --global --add safe.directory '*'
         # Committer timestamp.
         set -x
         commit_timestamp=$(git show -s --format=%ct)
