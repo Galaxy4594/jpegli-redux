@@ -664,13 +664,14 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
     if (is_yuv420) {
       global_scale *= k420GlobalScale;
     }
-    if (add_two_chroma_tables) {
+    if (add_two_chroma_tables && m->color_shift_correction < 1.0f) {
       cinfo->comp_info[2].quant_tbl_no = 2;
       num_base_tables = 3;
       base_quant_matrix[0] = kBaseQuantMatrixYCbCr;
       base_quant_matrix[1] = kBaseQuantMatrixYCbCr + DCTSIZE2;
       base_quant_matrix[2] = kBaseQuantMatrixYCbCr + 2 * DCTSIZE2;
     } else {
+      cinfo->comp_info[2].quant_tbl_no = 1;
       num_base_tables = 2;
       base_quant_matrix[0] = kBaseQuantMatrixYCbCr;
       // Use the Cr table for both Cb and Cr.
