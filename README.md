@@ -20,7 +20,8 @@ This repository includes several improvements and fixes merged from upstream pul
         *   Distance 1.0 (Quality ~90): 50% AQ strength.
         *   Distance >= 2.0: 100% full AQ strength.
     *   **Manual AQ scaling (`--aq_scale=FLOAT`)**: Manually controls the AQ scale. If omitted, automatically scales with distance.
-    *   **Visual energy correction (`--aq_mode=0|1|2`)**: Mode 2 (default) balances RDOQ deadzoning across channels to prevent double-dipping chroma loss. Mode 1 retains legacy AQ behavior, and mode 0 disables AQ. Can also be toggled with `--visual_energy_correction` and `--novisual_energy_correction`.
+    *   **Visual energy correction & Energy-based RDOQ (`--aq_mode=0|1|2`)**: Mode 2 (default) balances RDOQ deadzoning across channels and applies block AC energy protection and trellis-lite trailing coefficient deadzoning to preserve fine textures and edges. Mode 1 retains exact legacy upstream AQ behavior, and mode 0 disables AQ.
+    *   **Energy-based RDOQ (`--energy_based_rdoq`, `--noenergy_based_rdoq` / `--correct_aq`)**: Protects high-energy AC blocks from over-quantization and applies deadzoning preferentially to trailing EOB coefficients. Enabled by default in `--aq_mode=2`, and disabled in `--aq_mode=1`.
     *   **Color shift correction (`--color_shift_correction=FLOAT`, `--nocolor_shift_correction`)**: Aligns Cb quantization tables and deadzoning parameters with Cr to prevent color shifts and desaturation in fine warm/yellow details. Enabled by default with automatic warm-pixel detection, or manually adjustable via `[0.0, 1.0]` and toggleable with `--nocolor_shift_correction`.
 
 ## Usage

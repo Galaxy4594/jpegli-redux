@@ -80,6 +80,7 @@ struct jpeg_comp_master {
   bool chroma_subsampling_set_by_cli = false;
   bool use_sharpyuv;
   bool visual_energy_correction;
+  bool energy_based_rdoq;
   float distance;
   int progressive_level;
   size_t xsize_blocks;

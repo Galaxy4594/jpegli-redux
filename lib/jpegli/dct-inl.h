@@ -4,11 +4,13 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 
 #include "lib/jpegli/common.h"
+#include "lib/jpegli/common_internal.h"
 
 #if defined(JPEGLI_LIB_JPEGLI_DCT_INL_H_) == defined(HWY_TARGET_TOGGLE)
 #ifdef JPEGLI_LIB_JPEGLI_DCT_INL_H_
@@ -32,6 +34,7 @@ using hwy::HWY_NAMESPACE::Abs;
 using hwy::HWY_NAMESPACE::Add;
 using hwy::HWY_NAMESPACE::DemoteTo;
 using hwy::HWY_NAMESPACE::Ge;
+using hwy::HWY_NAMESPACE::GetLane;
 using hwy::HWY_NAMESPACE::Half;
 using hwy::HWY_NAMESPACE::IfThenElseZero;
 using hwy::HWY_NAMESPACE::Mul;
@@ -39,7 +42,9 @@ using hwy::HWY_NAMESPACE::MulAdd;
 using hwy::HWY_NAMESPACE::Rebind;
 using hwy::HWY_NAMESPACE::Round;
 using hwy::HWY_NAMESPACE::Sub;
+using hwy::HWY_NAMESPACE::SumOfLanes;
 using hwy::HWY_NAMESPACE::Vec;
+using hwy::HWY_NAMESPACE::Zero;
 
 template <size_t N>
 void AddReverse(const float* JPEGLI_RESTRICT a_in1,
@@ -223,21 +228,86 @@ JPEGLI_INLINE JPEGLI_MAYBE_UNUSED void StoreQuantizedValue(
 template <typename T>
 void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
                    const float* zero_bias_offset, const float* zero_bias_mul,
-                   T* block) {
+                   bool energy_based_rdoq, T* block) {
   const HWY_FULL(float) d;
   const HWY_FULL(int32_t) di;
 
-  const auto aq_mul = Set(d, aq_strength);
+  if (!energy_based_rdoq) {
+    const auto aq_mul = Set(d, aq_strength);
+    for (size_t k = 0; k < DCTSIZE2; k += Lanes(d)) {
+      const auto val = Load(d, dct + k);
+      const auto q = Load(d, qmc + k);
+      const auto qval = Mul(val, q);
+      const auto zb_offset = Load(d, zero_bias_offset + k);
+      const auto zb_mul = Load(d, zero_bias_mul + k);
+      const auto threshold = Add(zb_offset, Mul(zb_mul, aq_mul));
+      const auto nzero_mask = Ge(Abs(qval), threshold);
+      const auto ival = ConvertTo(di, IfThenElseZero(nzero_mask, Round(qval)));
+      StoreQuantizedValue(ival, block + k);
+    }
+    return;
+  }
+
+  if (aq_strength <= 0.0f) {
+    for (size_t k = 0; k < DCTSIZE2; k += Lanes(d)) {
+      const auto val = Load(d, dct + k);
+      const auto q = Load(d, qmc + k);
+      const auto qval = Mul(val, q);
+      const auto zb_offset = Load(d, zero_bias_offset + k);
+      const auto nzero_mask = Ge(Abs(qval), zb_offset);
+      const auto ival = ConvertTo(di, IfThenElseZero(nzero_mask, Round(qval)));
+      StoreQuantizedValue(ival, block + k);
+    }
+    return;
+  }
+
+  HWY_ALIGN float qval[DCTSIZE2];
+  auto energy_vec = Zero(d);
   for (size_t k = 0; k < DCTSIZE2; k += Lanes(d)) {
     const auto val = Load(d, dct + k);
     const auto q = Load(d, qmc + k);
-    const auto qval = Mul(val, q);
+    const auto qv = Mul(val, q);
+    Store(qv, d, qval + k);
+    energy_vec = Add(energy_vec, Mul(qv, qv));
     const auto zb_offset = Load(d, zero_bias_offset + k);
-    const auto zb_mul = Load(d, zero_bias_mul + k);
-    const auto threshold = Add(zb_offset, Mul(zb_mul, aq_mul));
-    const auto nzero_mask = Ge(Abs(qval), threshold);
-    const auto ival = ConvertTo(di, IfThenElseZero(nzero_mask, Round(qval)));
+    const auto nzero_mask = Ge(Abs(qv), zb_offset);
+    const auto ival = ConvertTo(di, IfThenElseZero(nzero_mask, Round(qv)));
     StoreQuantizedValue(ival, block + k);
+  }
+
+  // Total Block AC Energy Protection:
+  // Compute sum of squared AC coefficients sum_{k=1..63} |qval_k|^2
+  float total_energy = GetLane(SumOfLanes(d, energy_vec));
+  float ac_energy = std::max(0.0f, total_energy - qval[0] * qval[0]);
+  static constexpr float kAcEnergyAlpha = 0.02f;
+  float effective_aq = aq_strength / (1.0f + kAcEnergyAlpha * ac_energy);
+
+  // EOB-Aware / Trailing Coefficient Deadzoning ("Trellis-Lite"):
+  // Find the last non-zero AC coefficient in zigzag order.
+  int last_z = 0;
+  for (int z = 63; z >= 1; --z) {
+    if (block[jpegli::kJPEGNaturalOrder[z]] != 0) {
+      last_z = z;
+      break;
+    }
+  }
+
+  // Only apply aggressive dead-zoning to trailing coefficients backwards from
+  // last_z. Stop at the first coefficient that survives, keeping all prior
+  // interior coefficients safe with conservative rounding.
+  for (int z = last_z; z >= 1; --z) {
+    int k = jpegli::kJPEGNaturalOrder[z];
+    if (block[k] == 0) continue;
+
+    float aggr_threshold =
+        zero_bias_offset[k] + zero_bias_mul[k] * effective_aq;
+    aggr_threshold = std::min(aggr_threshold, 1.45f);
+
+    if (std::abs(qval[k]) < aggr_threshold) {
+      block[k] = 0;
+    } else {
+      break;
+    }
   }
 }
 
@@ -247,11 +317,13 @@ void ComputeCoefficientBlock(const float* JPEGLI_RESTRICT pixels, size_t stride,
                              int16_t last_dc_coeff, float aq_strength,
                              const float* zero_bias_offset,
                              const float* zero_bias_mul,
+                             bool energy_based_rdoq,
                              float* JPEGLI_RESTRICT tmp, T* block) {
   float* JPEGLI_RESTRICT dct = tmp;
   float* JPEGLI_RESTRICT scratch_space = tmp + DCTSIZE2;
   TransformFromPixels(pixels, stride, dct, scratch_space);
-  QuantizeBlock(dct, qmc, aq_strength, zero_bias_offset, zero_bias_mul, block);
+  QuantizeBlock(dct, qmc, aq_strength, zero_bias_offset, zero_bias_mul,
+                energy_based_rdoq, block);
   // Center DC values around zero.
   static constexpr float kDCBias = 128.0f;
   const float dc = (dct[0] - kDCBias) * qmc[0];

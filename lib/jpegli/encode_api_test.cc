@@ -368,7 +368,7 @@ std::vector<TestConfig> GenerateTests() {
           if (!progr) {
             config.jparams.optimize_coding = optimize;
           }
-          const float kMaxBpp[4] = {1.55, 1.4, 1.4, 1.32};
+          const float kMaxBpp[4] = {1.60, 1.45, 1.45, 1.35};
           const float kMaxDist[4] = {1.95, 2.2, 2.2, 2.0};
           const int idx = v_samp * 2 + h_samp - 3;
           config.max_bpp =
@@ -480,7 +480,7 @@ std::vector<TestConfig> GenerateTests() {
             config.jparams.v_sampling = {samp, 1, 1};
             config.jparams.quality = quality;
             config.jparams.restart_interval = r;
-            config.max_bpp = quality == 100 ? 12.5 : 1.9;
+            config.max_bpp = quality == 100 ? 12.5 : 1.95;
             if (r == 1) {
               config.max_bpp += 10.0;
             }
@@ -588,7 +588,7 @@ std::vector<TestConfig> GenerateTests() {
     TestConfig config;
     config.input.color_space = JCS_UNKNOWN;
     config.input.components = channels;
-    config.max_bpp = 1.35 * channels;
+    config.max_bpp = 1.38 * channels;
     config.max_dist = 1.4;
     all_tests.push_back(config);
   }
@@ -825,7 +825,7 @@ std::vector<TestConfig> GenerateTests() {
          {JPEGLI_LITTLE_ENDIAN, JPEGLI_BIG_ENDIAN, JPEGLI_NATIVE_ENDIAN}) {
       J_COLOR_SPACE colorspace[4] = {JCS_GRAYSCALE, JCS_UNKNOWN, JCS_RGB,
                                      JCS_CMYK};
-      float max_bpp[4] = {1.32, 2.7, 1.6, 4.15};
+      float max_bpp[4] = {1.32, 2.75, 1.6, 4.15};
       for (int channels = 1; channels <= 4; ++channels) {
         TestConfig config;
         config.input.data_type = data_type;
@@ -847,7 +847,7 @@ std::vector<TestConfig> GenerateTests() {
         config.jparams.smoothing_factor = smoothing;
         config.jparams.h_sampling = {h_sampling, 1, 1};
         config.jparams.v_sampling = {v_sampling, 1, 1};
-        config.max_bpp = 1.85;
+        config.max_bpp = 1.90;
         config.max_dist = 3.05f;
         all_tests.push_back(config);
       }

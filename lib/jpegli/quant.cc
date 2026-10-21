@@ -764,9 +764,7 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
       float mix1 = 1.0f - mix0;
       for (int c = 0; c < cinfo->num_components; ++c) {
         float correction = 1.0f;
-        if ((m->adaptive_quantization_mode == 2 ||
-             m->visual_energy_correction) &&
-            c < 3) {
+        if (m->visual_energy_correction && c < 3) {
           static const float kVisualEnergyCorrection[3] = {1.15f, 0.50f, 0.75f};
           correction = kVisualEnergyCorrection[c];
         }

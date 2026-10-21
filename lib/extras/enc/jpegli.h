@@ -31,6 +31,8 @@ struct JpegSettings {
   int adaptive_quantization_mode = 2;
   bool use_adaptive_quantization = true;
   bool visual_energy_correction = true;
+  // -1: default based on aq_mode (enabled in mode 2, disabled in mode 0/1). 0: disabled, 1: enabled.
+  int energy_based_rdoq = -1;
   // Adaptive quantization scale factor. If negative (default: -1.0f), auto.
   float aq_scale = -1.0f;
   bool use_std_quant_tables = false;

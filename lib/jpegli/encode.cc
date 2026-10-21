@@ -716,6 +716,7 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->adaptive_quantization_mode = 2;
   cinfo->master->use_sharpyuv = false;
   cinfo->master->visual_energy_correction = true;
+  cinfo->master->energy_based_rdoq = true;
   cinfo->master->color_shift_correction = 1.0f;
   cinfo->master->aq_scale = -1.0f;
   cinfo->master->distance = -1.0f;
@@ -986,6 +987,7 @@ void jpegli_set_adaptive_quantization_mode(j_compress_ptr cinfo, int mode) {
   cinfo->master->adaptive_quantization_mode = mode;
   cinfo->master->use_adaptive_quantization = (mode > 0);
   cinfo->master->visual_energy_correction = (mode == 2);
+  cinfo->master->energy_based_rdoq = (mode == 2);
 }
 
 void jpegli_enable_adaptive_quantization(j_compress_ptr cinfo, boolean value) {
@@ -994,10 +996,12 @@ void jpegli_enable_adaptive_quantization(j_compress_ptr cinfo, boolean value) {
     cinfo->master->adaptive_quantization_mode = 0;
     cinfo->master->use_adaptive_quantization = false;
     cinfo->master->visual_energy_correction = false;
+    cinfo->master->energy_based_rdoq = false;
   } else if (cinfo->master->adaptive_quantization_mode == 0) {
     cinfo->master->adaptive_quantization_mode = 2;
     cinfo->master->use_adaptive_quantization = true;
     cinfo->master->visual_energy_correction = true;
+    cinfo->master->energy_based_rdoq = true;
   }
 }
 
@@ -1017,14 +1021,12 @@ void jpegli_set_sharp_yuv(j_compress_ptr cinfo, boolean enable) {
 
 void jpegli_enable_visual_energy_correction(j_compress_ptr cinfo, boolean value) {
   CheckState(cinfo, jpegli::kEncStart);
-  if (FROM_JPEGLI_BOOL(value)) {
-    cinfo->master->adaptive_quantization_mode = 2;
-    cinfo->master->use_adaptive_quantization = true;
-    cinfo->master->visual_energy_correction = true;
-  } else if (cinfo->master->adaptive_quantization_mode == 2) {
-    cinfo->master->adaptive_quantization_mode = 1;
-    cinfo->master->visual_energy_correction = false;
-  }
+  cinfo->master->visual_energy_correction = FROM_JPEGLI_BOOL(value);
+}
+
+void jpegli_enable_energy_based_rdoq(j_compress_ptr cinfo, boolean value) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->energy_based_rdoq = FROM_JPEGLI_BOOL(value);
 }
 
 void jpegli_simple_progression(j_compress_ptr cinfo) {

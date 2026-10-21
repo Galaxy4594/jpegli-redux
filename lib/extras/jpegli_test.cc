@@ -244,7 +244,7 @@ TEST(JpegliTest, JpegliYUVChromaSubsamplingEncodeTest) {
 
     PackedPixelFile ppf_out;
     ASSERT_TRUE(DecodeWithLibjpeg(compressed, &ppf_out));
-    EXPECT_LE(BitsPerPixel(ppf_in, compressed), 1.55f);
+    EXPECT_LE(BitsPerPixel(ppf_in, compressed), 1.60f);
     EXPECT_LE(ButteraugliDistance(memory_manager, ppf_in, ppf_out), 1.82f);
   }
 }

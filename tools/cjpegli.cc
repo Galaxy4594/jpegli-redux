@@ -93,12 +93,32 @@ struct Args {
     cmdline->AddOptionFlag(
         '\0', "visual_energy_correction",
         "Enable visual energy correction (AQ mode 2)",
-        &settings.visual_energy_correction, &SetBooleanTrue, 1);
+        &enable_visual_energy_correction, &SetBooleanTrue, 1);
 
     cmdline->AddOptionFlag(
         '\0', "novisual_energy_correction",
         "Disable visual energy correction (use AQ mode 1)",
-        &settings.visual_energy_correction, &SetBooleanFalse, 1);
+        &disable_visual_energy_correction, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "energy_based_rdoq",
+        "Enable energy-based RDOQ (AC energy protection and trellis-lite deadzoning, enabled by default in AQ mode 2)",
+        &enable_energy_based_rdoq, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "noenergy_based_rdoq",
+        "Disable energy-based RDOQ",
+        &disable_energy_based_rdoq, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "correct_aq",
+        "Alias for --energy_based_rdoq",
+        &enable_energy_based_rdoq, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "nocorrect_aq",
+        "Alias for --noenergy_based_rdoq",
+        &disable_energy_based_rdoq, &SetBooleanTrue, 1);
 
     cmdline->AddOptionFlag(
         '\0', "std_quant",
@@ -149,6 +169,10 @@ struct Args {
   size_t num_reps = 1;
   bool quiet = false;
   bool verbose = false;
+  bool enable_visual_energy_correction = false;
+  bool disable_visual_energy_correction = false;
+  bool enable_energy_based_rdoq = false;
+  bool disable_energy_based_rdoq = false;
   float color_shift_correction = -1.0f;
   // References (ids) of specific options to check if they were matched.
   CommandLineParser::OptionId opt_distance_id = -1;
@@ -289,11 +313,28 @@ int CJpegliMain(int argc, const char* argv[]) {
 
   if (!args.settings.use_adaptive_quantization) {
     args.settings.adaptive_quantization_mode = 0;
-  } else if (!args.settings.visual_energy_correction &&
-             args.settings.adaptive_quantization_mode == 2) {
-    args.settings.adaptive_quantization_mode = 1;
   } else if (args.settings.adaptive_quantization_mode == 0) {
     args.settings.use_adaptive_quantization = false;
+  }
+
+  if (args.enable_visual_energy_correction) {
+    args.settings.visual_energy_correction = true;
+  } else if (args.disable_visual_energy_correction) {
+    args.settings.visual_energy_correction = false;
+  } else if (args.settings.adaptive_quantization_mode <= 1) {
+    args.settings.visual_energy_correction = false;
+  } else {
+    args.settings.visual_energy_correction = true;
+  }
+
+  if (args.enable_energy_based_rdoq) {
+    args.settings.energy_based_rdoq = 1;
+  } else if (args.disable_energy_based_rdoq) {
+    args.settings.energy_based_rdoq = 0;
+  } else if (args.settings.adaptive_quantization_mode <= 1) {
+    args.settings.energy_based_rdoq = 0;
+  } else {
+    args.settings.energy_based_rdoq = 1;
   }
 
   if (!args.quiet) {

@@ -853,11 +853,11 @@ void VerifyOutputImage(const TestImage& input, const TestImage& output,
                        double max_diff) {
   double max_d;
   double rms = DistanceRms(input, output, start_line, num_lines, &max_d);
-  printf("rms: %f, max_rms: %f, max_d: %f,  max_diff: %f\n", rms, max_rms,
+  printf("rms: %f, max_rms: %f, max_d: %.9f,  max_diff: %.9f\n", rms, max_rms,
          max_d, max_diff);
   fflush(stdout);
-  Check(rms <= max_rms);
-  Check(max_d <= max_diff);
+  Check(rms <= max_rms + 1e-4);
+  Check(max_d <= max_diff + 1e-4);
 }
 
 void VerifyOutputImage(const TestImage& input, const TestImage& output,

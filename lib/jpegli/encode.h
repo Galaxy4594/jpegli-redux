@@ -141,7 +141,7 @@ void jpegli_set_input_format(j_compress_ptr cinfo, JpegliDataType data_type,
                              JpegliEndianness endianness);
 
 // Sets adaptive quantization mode:
-// 0 = off, 1 = old behavior, 2 = AQ + visual_energy_correction (default: 2)
+// 0 = off, 1 = old behavior, 2 = AQ + visual_energy_correction + energy_based_rdoq (default: 2)
 void jpegli_set_adaptive_quantization_mode(j_compress_ptr cinfo, int mode);
 
 // Sets whether or not the encoder uses adaptive quantization for creating more
@@ -159,6 +159,9 @@ void jpegli_set_sharp_yuv(j_compress_ptr cinfo, boolean enable);
 
 // Enables visual energy correction to adjust chroma dead-zone quantization.
 void jpegli_enable_visual_energy_correction(j_compress_ptr cinfo, boolean value);
+
+// Enables energy-based RDOQ (AC energy protection and trellis-lite deadzoning).
+void jpegli_enable_energy_based_rdoq(j_compress_ptr cinfo, boolean value);
 
 // Sets the default progression parameters, where level 0 is sequential, and
 // greater level value means more progression steps. Default is 2.

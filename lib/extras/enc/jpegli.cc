@@ -466,6 +466,12 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
       jpegli_set_adaptive_quantization_mode(
           &cinfo, jpeg_settings.adaptive_quantization_mode);
     }
+    jpegli_enable_visual_energy_correction(
+        &cinfo, jpeg_settings.visual_energy_correction ? TRUE : FALSE);
+    if (jpeg_settings.energy_based_rdoq != -1) {
+      jpegli_enable_energy_based_rdoq(
+          &cinfo, jpeg_settings.energy_based_rdoq ? TRUE : FALSE);
+    }
     jpegli_set_adaptive_quantization_scale(&cinfo, jpeg_settings.aq_scale);
     if (jpeg_settings.use_sharpyuv) {
       jpegli_set_sharp_yuv(&cinfo, TRUE);
