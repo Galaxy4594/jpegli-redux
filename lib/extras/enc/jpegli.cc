@@ -472,6 +472,9 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
       jpegli_enable_energy_based_rdoq(
           &cinfo, jpeg_settings.energy_based_rdoq ? TRUE : FALSE);
     }
+    if (jpeg_settings.wasserstein_quant) {
+      jpegli_enable_wasserstein_quant(&cinfo, TRUE);
+    }
     jpegli_set_adaptive_quantization_scale(&cinfo, jpeg_settings.aq_scale);
     if (jpeg_settings.use_sharpyuv) {
       jpegli_set_sharp_yuv(&cinfo, TRUE);

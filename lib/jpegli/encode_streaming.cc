@@ -193,7 +193,8 @@ void ProcessiMCURow(j_compress_ptr cinfo) {
           const float* pixels = imcu_start[c] + (iy * stride + bx) * DCTSIZE;
           ComputeCoefficientBlock(pixels, stride, qmc, last_dc_coeff[c],
                                   aq_strength, zero_bias_offset, zero_bias_mul,
-                                  m->energy_based_rdoq, m->dct_buffer, block);
+                                  m->energy_based_rdoq, m->wasserstein_quant,
+                                  m->dct_buffer, block);
           if (kMode == kStreamingModeCoefficients) {
             JCOEF* cblock = &blocks[c][iy][bx][0];
             for (int k = 0; k < DCTSIZE2; ++k) {

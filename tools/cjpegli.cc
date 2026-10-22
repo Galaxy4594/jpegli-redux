@@ -121,6 +121,16 @@ struct Args {
         &disable_energy_based_rdoq, &SetBooleanTrue, 1);
 
     cmdline->AddOptionFlag(
+        '\0', "wasserstein_quant",
+        "Enable Wasserstein optimal transport quantization and energy conservation.",
+        &settings.wasserstein_quant, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "nowasserstein_quant",
+        "Disable Wasserstein optimal transport quantization.",
+        &settings.wasserstein_quant, &SetBooleanFalse, 1);
+
+    cmdline->AddOptionFlag(
         '\0', "std_quant",
         "Use quantization tables based on Annex K of the JPEG standard.",
         &settings.use_std_quant_tables, &SetBooleanTrue, 1);

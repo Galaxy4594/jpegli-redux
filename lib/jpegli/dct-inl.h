@@ -228,7 +228,7 @@ JPEGLI_INLINE JPEGLI_MAYBE_UNUSED void StoreQuantizedValue(
 template <typename T>
 void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
                    const float* zero_bias_offset, const float* zero_bias_mul,
-                   bool energy_based_rdoq, T* block) {
+                   bool energy_based_rdoq, bool wasserstein_quant, T* block) {
   const HWY_FULL(float) d;
   const HWY_FULL(int32_t) di;
 
@@ -301,6 +301,17 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
     max_deadzone = 0.70f + 0.75f * shadow_ratio;
   }
 
+  float orig_ac_energy = ac_energy;
+  float remaining_ac_energy = ac_energy;
+
+  // Darker blocks have higher perceptual sensitivity to transport error and
+  // energy loss (Weber-Fechner effect in low light). Scale up Wasserstein
+  // transport protection and AC energy retention in shadows.
+  float darkness = 0.0f;
+  if (wasserstein_quant && dct[0] < 96.0f) {
+    darkness = (96.0f - std::max(0.0f, dct[0])) / 96.0f;
+  }
+
   // Only apply aggressive dead-zoning to trailing coefficients backwards from
   // last_z. Stop at the first coefficient that survives, keeping all prior
   // interior coefficients safe with conservative rounding.
@@ -312,7 +323,31 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
         zero_bias_offset[k] + zero_bias_mul[k] * effective_aq;
     aggr_threshold = std::min(aggr_threshold, max_deadzone);
 
+    if (wasserstein_quant) {
+      int u = k / 8;
+      int v = k % 8;
+      // Sobolev H^-1 transport weight: low frequencies have high transport cost
+      float transport_w = 1.0f / std::sqrt(1.0f + 0.15f * (u * u + v * v));
+      // Tighter deadzone threshold for low frequencies; scale up strength in darker blocks
+      float transport_scale = 0.35f + 0.40f * darkness;
+      aggr_threshold *= (1.0f - transport_scale * transport_w);
+
+      // Energy mass conservation: if removing this coefficient drops total AC energy
+      // below the floor, preserve it to prevent texture/gradient flattening.
+      // In darker blocks, increase energy retention floor up to 85% to preserve subtle shadows.
+      float energy_floor = 0.65f + 0.20f * darkness;
+      float min_energy = 1.0f - 0.75f * darkness;
+      float coef_energy = qval[k] * qval[k];
+      if (orig_ac_energy > min_energy &&
+          (remaining_ac_energy - coef_energy) < energy_floor * orig_ac_energy) {
+        break;
+      }
+    }
+
     if (std::abs(qval[k]) < aggr_threshold) {
+      if (wasserstein_quant) {
+        remaining_ac_energy -= qval[k] * qval[k];
+      }
       block[k] = 0;
     } else {
       break;
@@ -327,16 +362,21 @@ void ComputeCoefficientBlock(const float* JPEGLI_RESTRICT pixels, size_t stride,
                              const float* zero_bias_offset,
                              const float* zero_bias_mul,
                              bool energy_based_rdoq,
+                             bool wasserstein_quant,
                              float* JPEGLI_RESTRICT tmp, T* block) {
   float* JPEGLI_RESTRICT dct = tmp;
   float* JPEGLI_RESTRICT scratch_space = tmp + DCTSIZE2;
   TransformFromPixels(pixels, stride, dct, scratch_space);
   QuantizeBlock(dct, qmc, aq_strength, zero_bias_offset, zero_bias_mul,
-                energy_based_rdoq, block);
+                energy_based_rdoq, wasserstein_quant, block);
   // Center DC values around zero.
   static constexpr float kDCBias = 128.0f;
   const float dc = (dct[0] - kDCBias) * qmc[0];
   float dc_threshold = zero_bias_offset[0] + aq_strength * zero_bias_mul[0];
+  if (wasserstein_quant && dct[0] < 96.0f) {
+    float darkness = (96.0f - std::max(0.0f, dct[0])) / 96.0f;
+    dc_threshold *= (1.0f - 0.40f * darkness);
+  }
   if (std::abs(dc - last_dc_coeff) < dc_threshold) {
     block[0] = last_dc_coeff;
   } else {

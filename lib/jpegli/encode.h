@@ -163,6 +163,9 @@ void jpegli_enable_visual_energy_correction(j_compress_ptr cinfo, boolean value)
 // Enables energy-based RDOQ (AC energy protection and trellis-lite deadzoning).
 void jpegli_enable_energy_based_rdoq(j_compress_ptr cinfo, boolean value);
 
+// Enables Wasserstein optimal transport quantization and energy conservation.
+void jpegli_enable_wasserstein_quant(j_compress_ptr cinfo, boolean value);
+
 // Sets the default progression parameters, where level 0 is sequential, and
 // greater level value means more progression steps. Default is 2.
 void jpegli_set_progressive_level(j_compress_ptr cinfo, int level);

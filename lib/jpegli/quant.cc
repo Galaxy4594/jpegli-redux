@@ -721,6 +721,17 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
         float cr_val = base_quant_matrix[2][k];
         base_val += boost * (cr_val - base_val);
       }
+      if (m->wasserstein_quant) {
+        // Optimal transport / Wasserstein metric Sobolev H^-1 reweighting:
+        // Transporting error across low frequencies has high spatial transport cost,
+        // so low frequencies are quantized finer, while high frequencies (which cancel
+        // out over 1-2 pixels) absorb the bitrate constraint.
+        int u = k / 8;
+        int v = k % 8;
+        float r = std::sqrt(static_cast<float>(u * u + v * v));
+        float w_scale = std::pow((r + 1.2f) / 4.5f, 0.30f);
+        base_val *= w_scale;
+      }
       int qval = std::round(scale * base_val);
       (*qtable)->quantval[k] = std::max(1, std::min(qval, quant_max));
     }

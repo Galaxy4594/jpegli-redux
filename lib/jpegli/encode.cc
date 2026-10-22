@@ -721,6 +721,7 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->use_sharpyuv = false;
   cinfo->master->visual_energy_correction = true;
   cinfo->master->energy_based_rdoq = true;
+  cinfo->master->wasserstein_quant = false;
   cinfo->master->color_shift_correction = 1.0f;
   cinfo->master->aq_scale = -1.0f;
   cinfo->master->distance = -1.0f;
@@ -1032,6 +1033,11 @@ void jpegli_enable_visual_energy_correction(j_compress_ptr cinfo, boolean value)
 void jpegli_enable_energy_based_rdoq(j_compress_ptr cinfo, boolean value) {
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->energy_based_rdoq = FROM_JPEGLI_BOOL(value);
+}
+
+void jpegli_enable_wasserstein_quant(j_compress_ptr cinfo, boolean value) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->wasserstein_quant = FROM_JPEGLI_BOOL(value);
 }
 
 void jpegli_simple_progression(j_compress_ptr cinfo) {
