@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 #include "lib/base/types.h"
 #include "lib/jpegli/common.h"
@@ -579,6 +581,53 @@ void ComputeAdaptiveQuantField(j_compress_ptr cinfo) {
     float* row = m->quant_field.Row(yb0 + y);
     for (size_t x = 0; x < xsize_blocks; ++x) {
       row[x] = std::max(0.0f, (0.6f / row[x]) - 1.0f) * aq_scale;
+    }
+  }
+
+  // Spatial AQ regularization (mode 2): 2D smooth out abrupt block-to-block AQ cliffs
+  // to avoid adjacent flat vs textured checkerboard artifacts.
+  if (m->adaptive_quantization_mode == 2 && xsize_blocks >= 2) {
+    const int num_y = cinfo->max_v_samp_factor;
+    std::vector<std::vector<float>> smoothed(num_y,
+                                             std::vector<float>(xsize_blocks));
+    for (int y = 0; y < num_y; ++y) {
+      const float* curr = m->quant_field.Row(yb0 + y);
+      const float* top = nullptr;
+      if (y > 0) {
+        top = m->quant_field.Row(yb0 + y - 1);
+      } else if (m->next_iMCU_row > 0 && m->prev_quant_row != nullptr) {
+        top = m->prev_quant_row;
+      } else {
+        top = curr;
+      }
+
+      const float* bottom = nullptr;
+      if (y + 1 < num_y) {
+        bottom = m->quant_field.Row(yb0 + y + 1);
+      } else {
+        bottom = curr;
+      }
+
+      for (size_t x = 0; x < xsize_blocks; ++x) {
+        float c = curr[x];
+        float l = (x > 0) ? curr[x - 1] : c;
+        float r = (x + 1 < xsize_blocks) ? curr[x + 1] : c;
+        float t = top[x];
+        float b = bottom[x];
+
+        // 2D 5-point cross stencil: center 0.50, 4 neighbors 0.125
+        smoothed[y][x] = 0.50f * c + 0.125f * (l + r + t + b);
+      }
+    }
+
+    for (int y = 0; y < num_y; ++y) {
+      float* row = m->quant_field.Row(yb0 + y);
+      memcpy(row, smoothed[y].data(), xsize_blocks * sizeof(float));
+    }
+
+    if (m->prev_quant_row != nullptr) {
+      const float* last_row = m->quant_field.Row(yb0 + num_y - 1);
+      memcpy(m->prev_quant_row, last_row, xsize_blocks * sizeof(float));
     }
   }
 }

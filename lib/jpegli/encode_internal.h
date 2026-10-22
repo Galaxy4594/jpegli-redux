@@ -125,6 +125,7 @@ struct jpeg_comp_master {
   jpegli::RowBuffer<float> fuzzy_erosion_tmp;
   jpegli::RowBuffer<float> pre_erosion;
   jpegli::RowBuffer<float> quant_field;
+  float* prev_quant_row;
   jvirt_barray_ptr* coeff_buffers;
   size_t next_input_row;
   size_t next_iMCU_row;

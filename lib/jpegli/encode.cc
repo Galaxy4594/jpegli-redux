@@ -486,9 +486,13 @@ void AllocateBuffers(j_compress_ptr cinfo) {
       qf_height *= cinfo->total_iMCU_rows;
     }
     m->quant_field.Allocate(cinfo, qf_height, xsize_blocks);
+    m->prev_quant_row =
+        Allocate<float>(cinfo, xsize_blocks, JPOOL_IMAGE_ALIGNED);
+    memset(m->prev_quant_row, 0, xsize_blocks * sizeof(float));
   } else {
     m->quant_field.Allocate(cinfo, 1, m->xsize_blocks);
     m->quant_field.FillRow(0, 0, m->xsize_blocks);
+    m->prev_quant_row = nullptr;
   }
   for (int c = 0; c < cinfo->num_components; ++c) {
     m->zero_bias_offset[c] =
@@ -724,6 +728,7 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->data_type = JPEGLI_TYPE_UINT8;
   cinfo->master->endianness = JPEGLI_NATIVE_ENDIAN;
   cinfo->master->coeff_buffers = nullptr;
+  cinfo->master->prev_quant_row = nullptr;
 }
 
 void jpegli_set_xyb_mode(j_compress_ptr cinfo) {

@@ -542,7 +542,7 @@ float DistanceToLinearQuality(float distance) {
 }
 
 constexpr float kExponent[DCTSIZE2] = {
-    1.00f, 0.51f, 0.67f, 0.74f, 1.00f, 1.00f, 1.00f, 1.00f,  //
+    0.35f, 0.51f, 0.67f, 0.74f, 1.00f, 1.00f, 1.00f, 1.00f,  //
     0.51f, 0.66f, 0.69f, 0.87f, 1.00f, 1.00f, 1.00f, 1.00f,  //
     0.67f, 0.69f, 0.84f, 0.83f, 0.96f, 1.00f, 1.00f, 1.00f,  //
     0.74f, 0.87f, 0.83f, 1.00f, 1.00f, 0.91f, 0.91f, 1.00f,  //
@@ -559,7 +559,11 @@ float DistanceToScale(float distance, int k) {
   }
   const float exp = kExponent[k];
   const float mul = std::pow(kDist0, 1.0 - exp);
-  return std::max<float>(0.5f * distance, mul * std::pow(distance, exp));
+  float s = mul * std::pow(distance, exp);
+  if (k != 0) {
+    s = std::max<float>(0.5f * distance, s);
+  }
+  return s;
 }
 
 float ScaleToDistance(float scale, int k) {
@@ -568,7 +572,11 @@ float ScaleToDistance(float scale, int k) {
   }
   const float exp = 1.0 / kExponent[k];
   const float mul = std::pow(kDist0, 1.0 - exp);
-  return std::min<float>(2.0f * scale, mul * std::pow(scale, exp));
+  float d = mul * std::pow(scale, exp);
+  if (k != 0) {
+    d = std::min<float>(2.0f * scale, d);
+  }
+  return d;
 }
 
 }  // namespace

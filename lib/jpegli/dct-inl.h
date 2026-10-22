@@ -292,6 +292,15 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
     }
   }
 
+  // In shadow/dark regions (dct[0] < 45), human contrast sensitivity to blockiness
+  // and contouring is high (Weber-Fechner effect in low light). Scale down
+  // the maximum aggressive dead-zoning ceiling to prevent wiping out subtle AC gradients.
+  float max_deadzone = 1.45f;
+  if (dct[0] < 45.0f) {
+    float shadow_ratio = std::max(0.0f, dct[0]) / 45.0f;
+    max_deadzone = 0.70f + 0.75f * shadow_ratio;
+  }
+
   // Only apply aggressive dead-zoning to trailing coefficients backwards from
   // last_z. Stop at the first coefficient that survives, keeping all prior
   // interior coefficients safe with conservative rounding.
@@ -301,7 +310,7 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
 
     float aggr_threshold =
         zero_bias_offset[k] + zero_bias_mul[k] * effective_aq;
-    aggr_threshold = std::min(aggr_threshold, 1.45f);
+    aggr_threshold = std::min(aggr_threshold, max_deadzone);
 
     if (std::abs(qval[k]) < aggr_threshold) {
       block[k] = 0;
