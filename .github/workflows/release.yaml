@@ -64,6 +64,7 @@ jobs:
           libwebp-dev \
           ninja-build \
           pkg-config \
+          tarlz \
         #
         echo "CC=clang" >> $GITHUB_ENV
         echo "CXX=clang++" >> $GITHUB_ENV
@@ -87,24 +88,17 @@ jobs:
 
     - name: Package release tarball
       run: |
+        ROOT=`pwd`
         cd build
-        tar -zcvf ${{ runner.workspace }}/release_file.tar.gz \
+        tarlz -9cvf ${ROOT}/jpegli-linux-x86_64-static.tar.lz \
           LICENSE* tools/{cjpegli,djpegli}
-        ln -s ${{ runner.workspace }}/release_file.tar.gz \
-          ${{ runner.workspace }}/jpegli-linux-x86_64-static-${{ github.event.release.tag_name }}.tar.gz
 
     - name: Upload artifacts
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: jpegli-linux-x86_64-static
-        path: ${{ runner.workspace }}/release_file.tar.gz
-
-    - name: Upload binaries to release
-      if: github.event_name == 'release'
-      uses: AButler/upload-release-assets@3d6774fae0ed91407dc5ae29d576b166536d1777 # v3.0
-      with:
-        files: ${{ runner.workspace }}/jpegli-linux-x86_64-static-${{ github.event.release.tag_name }}.tar.gz
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        path: jpegli-linux-x86_64-static.tar.lz
+        archive: false
 
 
   # Build .deb packages Ubuntu/Debian
@@ -187,9 +181,10 @@ jobs:
       if: github.event_name == 'release'
       shell: 'bash'
       run: |
-        if head -n1 debian/changelog | grep UNRELEASED; then
-          dch -M --distribution unstable --release ''
-        fi
+        tag="${{ github.event.release.tag_name }}"
+        tag="${tag#v}"
+        dch -M --distribution unstable -b --newversion "${tag}-1" \
+          "Release version ${tag}"
 
     - name: Configure hwy
       if: ${{ github.event_name == 'schedule' || github.event_name == 'release' || contains(github.event.pull_request.labels.*.name, 'CI:full') }}
@@ -211,27 +206,18 @@ jobs:
       run: |
         ./ci.sh debian_stats
 
+    - name: Package release tarball
+      run: |
+        ROOT=`pwd`
+        cd build/debs/
+        tar -cvf ${ROOT}/${{ steps.env.outputs.artifact_name }}.tar *jpegli*.*
+
     - name: Upload artifacts
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ steps.env.outputs.artifact_name }}
-        path: |
-          build/debs/*jpegli*.*
-
-    - name: Package release tarball
-      if: github.event_name == 'release'
-      run: |
-        (cd build/debs/; find -maxdepth 1 -name '*jpegli*.*') | \
-        tar -zcvf release_file.tar.gz -C build/debs/ -T -
-        ln -s release_file.tar.gz \
-          ${{ steps.env.outputs.artifact_name }}-${{ github.event.release.tag_name }}.tar.gz
-
-    - name: Upload binaries to release
-      if: github.event_name == 'release'
-      uses: AButler/upload-release-assets@3d6774fae0ed91407dc5ae29d576b166536d1777 # v3.0
-      with:
-        files: ${{ steps.env.outputs.artifact_name }}-${{ github.event.release.tag_name }}.tar.gz
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        path: ${{ steps.env.outputs.artifact_name }}.tar
+        archive: false
 
 
   windows_build:
@@ -367,8 +353,8 @@ jobs:
       shell: 'bash'
       if: matrix.upload != 'OFF'
       run: |
-        7z -mx a jpegli-${{matrix.triplet}}.7z ${PREFIX}/bin/* ${PREFIX}/lib/*
-        7z -mx a jpegli-${{matrix.triplet}}.zip ${PREFIX}/bin/* ${PREFIX}/lib/*
+        7z -mx=9 -mfb=273 a jpegli-${{matrix.triplet}}.7z ${PREFIX}/bin/* ${PREFIX}/lib/*
+        7z -mm=Deflate64 -mfb=257 -mpass=15 -mtp=2 a jpegli-${{matrix.triplet}}.zip ${PREFIX}/bin/* ${PREFIX}/lib/*
 
     - name: Upload release
       if: matrix.upload != 'OFF'

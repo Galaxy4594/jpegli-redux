@@ -5,7 +5,7 @@
 # https://developers.google.com/open-source/licenses/bsd
 
 set(JPEGLI_MAJOR_VERSION 0)
-set(JPEGLI_MINOR_VERSION 12)
+set(JPEGLI_MINOR_VERSION 1)
 set(JPEGLI_PATCH_VERSION 0)
 set(JPEGLI_LIBRARY_VERSION
     "${JPEGLI_MAJOR_VERSION}.${JPEGLI_MINOR_VERSION}.${JPEGLI_PATCH_VERSION}")
@@ -16,7 +16,7 @@ set(JPEGLI_LIBRARY_VERSION
 # It is important to update this value when making incompatible API/ABI changes
 # so that programs that depend on libjpegli can update their dependencies. Semantic
 # versioning allows 0.y.z to have incompatible changes in minor versions.
-set(JPEGLI_SO_MINOR_VERSION 12)
+set(JPEGLI_SO_MINOR_VERSION 1)
 if (JPEGLI_MAJOR_VERSION EQUAL 0)
   set(JPEGLI_LIBRARY_SOVERSION
       "${JPEGLI_MAJOR_VERSION}.${JPEGLI_SO_MINOR_VERSION}")
