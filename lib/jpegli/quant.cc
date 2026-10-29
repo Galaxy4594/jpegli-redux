@@ -597,7 +597,7 @@ float QuantValsToDistance(j_compress_ptr cinfo) {
     int quant_idx = cinfo->comp_info[c].quant_tbl_no;
     uint16_t* quantval = cinfo->quant_tbl_ptrs[quant_idx]->quantval;
     const float* base_qm = &kBaseQuantMatrixYCbCr[quant_idx * DCTSIZE2];
-    for (int k = 0; k < DCTSIZE2; ++k) {
+    for (int k = 0; k < 2; ++k) {
       float dmin = 0.0;
       float dmax = kDistMax;
       float invq = 1.0f / base_qm[k] / global_scale;
@@ -721,6 +721,50 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
         float cr_val = base_quant_matrix[2][k];
         base_val += boost * (cr_val - base_val);
       }
+      if (m->energy_based_rdoq && !xyb && !m->use_std_tables) {
+        // CastleCSF / CVVDP perceptual frequency shaping:
+        // Smooth out the Nelder-Mead notch in kBaseQuantMatrixYCbCr at the
+        // human CSF peak (2 <= u + v <= 4 along rows/cols 0..1, especially
+        // (0,2), (2,0), (1,1), (1,2), (2,1), (0,3), (3,0), (1,3), (3,1)),
+        // and roll off invisible high diagonal frequencies (u + v >= 7, where
+        // kBaseQuantMatrixYCbCr dips at (7,7)).
+        int u = k / 8;
+        int v = k % 8;
+        int uv = u + v;
+        if (quant_idx == 0) {
+          if ((u == 0 && v == 2) || (u == 2 && v == 0)) {
+            base_val *= 0.65f;
+          } else if (u == 1 && v == 1) {
+            base_val *= 0.80f;
+          } else if ((u == 1 && v == 2) || (u == 2 && v == 1)) {
+            base_val *= 0.75f;
+          } else if (uv >= 3 && uv <= 4 && (u <= 1 || v <= 1)) {
+            base_val *= 0.84f;
+          } else if (uv >= 7) {
+            float high_scale = 1.0f + 0.08f * static_cast<float>(uv - 6);
+            if (u >= 6 && v >= 6) {
+              high_scale *= 1.18f;
+            }
+            base_val *= high_scale;
+          }
+          if (uv >= 2 && m->use_adaptive_quantization &&
+              m->cicp_transfer_function != kTransferFunctionPQ &&
+              m->cicp_transfer_function != kTransferFunctionHLG) {
+            base_val *= 1.13f;
+          }
+        } else {
+          // For chroma, protect low-frequency CSF peak (u + v <= 3) and roll
+          // off high-frequency chroma noise (u + v >= 5) that human opponent-
+          // color vision cannot resolve.
+          if ((u == 0 && v == 2) || (u == 2 && v == 0)) {
+            base_val *= 0.78f;
+          } else if (uv >= 2 && uv <= 3 && (u <= 1 || v <= 1)) {
+            base_val *= 0.85f;
+          } else if (uv >= 5) {
+            base_val *= 1.0f + 0.10f * static_cast<float>(uv - 4);
+          }
+        }
+      }
       if (m->wasserstein_quant) {
         // Optimal transport / Wasserstein metric Sobolev H^-1 reweighting:
         // Transporting error across low frequencies has high spatial transport cost,
@@ -729,7 +773,7 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
         int u = k / 8;
         int v = k % 8;
         float r = std::sqrt(static_cast<float>(u * u + v * v));
-        float w_scale = std::pow((r + 1.2f) / 4.5f, 0.30f);
+        float w_scale = std::pow((r + 1.2f) / 4.5f, 0.10f);
         base_val *= w_scale;
       }
       int qval = std::round(scale * base_val);
@@ -794,6 +838,22 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
           m->zero_bias_mul[c][k] = (mix0 * mul0 + mix1 * mul1) * correction;
           m->zero_bias_offset[c][k] =
               k == 0 ? kZeroBiasOffsetYCbCrDC[c] : kZeroBiasOffsetYCbCrAC[c];
+          if (m->energy_based_rdoq && k > 0) {
+            int u = k / 8;
+            int v = k % 8;
+            int uv = u + v;
+            // Protect CSF-peak low AC frequencies (1 <= u + v <= 4, min(u,v) <= 1)
+            // from pre-trellis zero-bias clipping and excessive deadzoning.
+            if (uv <= 4 && (u <= 1 || v <= 1)) {
+              m->zero_bias_offset[c][k] =
+                  0.505f + 0.018f * static_cast<float>(uv - 1);
+              if (c == 0) {
+                float csf_cap = 0.08f * static_cast<float>(uv);
+                m->zero_bias_mul[c][k] =
+                    std::min(m->zero_bias_mul[c][k], csf_cap);
+              }
+            }
+          }
         }
       }
       // Linearly interpolate Cb's dead-zoning parameters (both zero_bias_mul
