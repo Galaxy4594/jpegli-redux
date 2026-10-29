@@ -765,17 +765,6 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
           }
         }
       }
-      if (m->wasserstein_quant) {
-        // Optimal transport / Wasserstein metric Sobolev H^-1 reweighting:
-        // Transporting error across low frequencies has high spatial transport cost,
-        // so low frequencies are quantized finer, while high frequencies (which cancel
-        // out over 1-2 pixels) absorb the bitrate constraint.
-        int u = k / 8;
-        int v = k % 8;
-        float r = std::sqrt(static_cast<float>(u * u + v * v));
-        float w_scale = std::pow((r + 1.2f) / 4.5f, 0.10f);
-        base_val *= w_scale;
-      }
       int qval = std::round(scale * base_val);
       (*qtable)->quantval[k] = std::max(1, std::min(qval, quant_max));
     }
@@ -852,6 +841,19 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
                 m->zero_bias_mul[c][k] =
                     std::min(m->zero_bias_mul[c][k], csf_cap);
               }
+            }
+          }
+          if (m->wasserstein_quant && c == 0 && k > 0) {
+            int u = k / 8;
+            int v = k % 8;
+            float r = std::sqrt(static_cast<float>(u * u + v * v));
+            // Radially isotropic Sobolev H^-1 / 2-Wasserstein pre-trellis
+            // protection across the Luma CSF passband (r <= 5.0), preventing
+            // Step-1 clipping of interior diagonal and mid-frequency coefficients.
+            if (r <= 5.0f) {
+              m->zero_bias_offset[c][k] =
+                  std::min(m->zero_bias_offset[c][k],
+                           0.502f + 0.011f * (r - 1.0f));
             }
           }
         }
