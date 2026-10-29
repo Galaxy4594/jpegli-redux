@@ -76,6 +76,10 @@ struct Args {
     cmdline->AddOptionFlag('\0', "xyb", "Convert to XYB colorspace",
                            &settings.xyb, &SetBooleanTrue, 1);
 
+    cmdline->AddOptionFlag('\0', "rgb",
+                           "Compress in RGB colorspace (very inefficient)",
+                           &settings.rgb, &SetBooleanTrue, 1);
+
     cmdline->AddOptionFlag('\0', "sharp_yuv",
                            "Use true linear-light sharp YUV downsampling for 4:2:0",
                            &settings.use_sharpyuv, &SetBooleanTrue, 1);
@@ -199,9 +203,17 @@ bool ValidateArgs(const Args& args) {
     fprintf(stderr, "Invalid --quality argument\n");
     return false;
   }
+  if (settings.rgb && settings.xyb) {
+    fprintf(stderr, "Cannot specify both --rgb and --xyb\n");
+    return false;
+  }
   std::string cs = settings.chroma_subsampling;
   if (!cs.empty() && cs != "444" && cs != "440" && cs != "422" && cs != "420") {
     fprintf(stderr, "Invalid --chroma_subsampling argument\n");
+    return false;
+  }
+  if (settings.rgb && !cs.empty() && cs != "444") {
+    fprintf(stderr, "RGB colorspace only supports 4:4:4 (no subsampling)\n");
     return false;
   }
   if (settings.progressive_level < 0 || settings.progressive_level > 2) {
@@ -288,7 +300,7 @@ int CJpegliMain(int argc, const char* argv[]) {
       float warm_pixels = 0.0f;
       float total_pixels = 0.0f;
       for (const auto& img : ppf.frames) {
-        if (img.color.format.num_channels < 3 || args.settings.xyb) continue;
+        if (img.color.format.num_channels < 3 || args.settings.xyb || args.settings.rgb) continue;
         size_t stride_y = std::max<size_t>(1, img.color.ysize / 128);
         size_t stride_x = std::max<size_t>(1, img.color.xsize / 128);
         for (size_t y = 0; y < img.color.ysize; y += stride_y) {
@@ -312,9 +324,6 @@ int CJpegliMain(int argc, const char* argv[]) {
       correction = std::min(1.0f, std::max(0.0f, correction));
     }
     args.settings.color_shift_correction = correction;
-    if (!args.quiet && correction > 0.0f) {
-      fprintf(stderr, "Color shift correction factor: %.3f\n", correction);
-    }
   }
 
   if (!ValidateArgs(args) || !SetDistance(args, cmdline, &args.settings)) {
@@ -347,19 +356,100 @@ int CJpegliMain(int argc, const char* argv[]) {
     args.settings.energy_based_rdoq = 1;
   }
 
+  float calculated_distance =
+      cmdline.GetOption(args.opt_quality_id)->matched()
+          ? jpegli_quality_to_distance(args.settings.quality)
+          : args.settings.distance;
+
+  bool chroma_subsampling_specified =
+      !args.settings.chroma_subsampling.empty();
+  std::string effective_subsampling;
+  bool heuristic_420_applied = false;
+  bool heuristic_rgb_applied = false;
+
+  if (args.settings.rgb) {
+    effective_subsampling = "444";
+  } else if (chroma_subsampling_specified) {
+    effective_subsampling = args.settings.chroma_subsampling;
+  } else if (!args.settings.xyb && calculated_distance >= 1.9f) {
+    effective_subsampling = "420";
+    heuristic_420_applied = true;
+  } else {
+    effective_subsampling = "444";
+  }
+
+  if (!args.settings.rgb && !args.settings.xyb && calculated_distance <= 0.01f &&
+      ppf.info.num_color_channels >= 3) {
+    heuristic_rgb_applied = true;
+  }
+
+  bool is_420 = !args.settings.rgb && (effective_subsampling == "420");
+
   if (!args.quiet) {
+    if (heuristic_420_applied) {
+      if (!args.settings.use_sharpyuv && !args.settings.xyb) {
+        fprintf(stderr,
+                "At lower qualities 4:2:0 subsampling is active, consider "
+                "trying --sharp_yuv for sharper chroma downsampling.\n");
+      } else {
+        fprintf(stderr, "At lower qualities 4:2:0 subsampling is active.\n");
+      }
+    } else if (is_420 && !args.settings.use_sharpyuv && !args.settings.xyb) {
+      fprintf(stderr,
+              "Consider trying --sharp_yuv for sharper chroma downsampling.\n");
+    }
+    if (heuristic_rgb_applied) {
+      fprintf(stderr, "At quality 100 switching to RGB colorspace.\n");
+    }
+
+    if (args.verbose) {
+      float effective_aq_scale = args.settings.aq_scale;
+      bool aq_scale_auto = false;
+      if (effective_aq_scale < 0.0f) {
+        effective_aq_scale =
+            std::min(1.0f, std::max(0.0f, calculated_distance * 0.5f));
+        aq_scale_auto = true;
+      }
+      fprintf(stderr, "Verbose encoding parameters:\n");
+      if (args.settings.use_adaptive_quantization &&
+          args.settings.adaptive_quantization_mode > 0) {
+        fprintf(stderr, "  AQ mode: %d (%s)\n",
+                args.settings.adaptive_quantization_mode,
+                args.settings.adaptive_quantization_mode == 2
+                    ? "spatial AQ + visual energy correction"
+                    : "legacy AQ");
+        fprintf(stderr, "  AQ scale: %.3f (%s)\n", effective_aq_scale,
+                aq_scale_auto ? "auto-computed from distance" : "manual");
+        fprintf(stderr, "  Visual energy correction: %s\n",
+                args.settings.visual_energy_correction ? "enabled"
+                                                       : "disabled");
+        fprintf(stderr, "  Energy-based RDOQ: %s\n",
+                args.settings.energy_based_rdoq == 1 ? "enabled"
+                                                     : "disabled");
+      } else {
+        fprintf(stderr, "  Adaptive quantization: disabled\n");
+      }
+      fprintf(stderr, "  Color shift correction factor: %.3f (%s)\n",
+              args.settings.color_shift_correction,
+              args.color_shift_correction < 0.0f ? "auto-detected"
+                                                 : "manual");
+      fprintf(stderr, "  Wasserstein quant: %s\n",
+              args.settings.wasserstein_quant ? "enabled" : "disabled");
+      fprintf(stderr, "  Sharp YUV downsampling: %s\n",
+              args.settings.use_sharpyuv ? "enabled" : "disabled");
+    }
+
     const jpegli::extras::JpegSettings& s = args.settings;
-    float calculated_distance =
-        cmdline.GetOption(args.opt_quality_id)->matched()
-            ? jpegli_quality_to_distance(s.quality)
-            : s.distance;
+    const char* colorspace_str =
+        s.xyb ? "XYB" : (s.rgb || heuristic_rgb_applied ? "RGB" : "YUV");
     const char* aq_str = "noAQ";
     if (s.use_adaptive_quantization && s.adaptive_quantization_mode > 0) {
       aq_str = s.adaptive_quantization_mode == 2 ? "AQ2" : "AQ1";
     }
-    fprintf(stderr, "Encoding [%s%s d%.3f%s %s p%d %s]\n",
-            s.xyb ? "XYB" : "YUV", s.chroma_subsampling.c_str(),
+    fprintf(stderr, "Encoding [%s%s d%.3f%s%s %s p%d %s]\n",
+            colorspace_str, effective_subsampling.c_str(),
             calculated_distance, s.use_std_quant_tables ? " StdQuant" : "",
+            s.use_sharpyuv ? " SharpYUV" : "",
             aq_str, s.progressive_level,
             s.optimize_coding ? "OPT" : "FIX");
   }

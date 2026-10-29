@@ -867,6 +867,7 @@ void jpegli_set_colorspace(j_compress_ptr cinfo, J_COLOR_SPACE colorspace) {
 
 static void ApplyDistanceHeuristics(j_compress_ptr cinfo, float distance) {
   if (distance >= 1.9f && !(cinfo->master->xyb_mode) &&
+      cinfo->jpeg_color_space != JCS_RGB &&
       !cinfo->master->chroma_subsampling_set_by_cli) {
     // At medium qualities, 420 subsampling begins to outperform 444.
     cinfo->comp_info[0].h_samp_factor = cinfo->comp_info[0].v_samp_factor = 2;
@@ -878,6 +879,7 @@ static void ApplyDistanceHeuristics(j_compress_ptr cinfo, float distance) {
   if (distance <= 0.01f && cinfo->in_color_space == JCS_RGB &&
       cinfo->jpeg_color_space != JCS_RGB) {
     cinfo->jpeg_color_space = JCS_RGB;
+    cinfo->write_Adobe_marker = TRUE;
     cinfo->comp_info[0].component_id = 'R';
     cinfo->comp_info[1].component_id = 'G';
     cinfo->comp_info[2].component_id = 'B';

@@ -1,6 +1,9 @@
 # Jpegli-redux: an improved JPEG encoder and decoder implementation
 
-This repository is a fork of Jpegli (a JPEG encoder and decoder implementation that is API and ABI compatible with libjpeg62).
+This repository is a fork of Jpegli (an advanced JPEG encoder and decoder library).
+
+> [!NOTE]
+> `jpegli-redux` libraries do **not** guarantee drop-in compatibility with `libjpeg-6.2` (API or ABI), and there are no plans to make them compatible in the future. This fork focuses on superior image quality rather than legacy compatibility.
 The goal of `jpegli-redux` is to merge in various pull requests fixing issues, add features for tuning the encoding/decoding process, and provide a repository for binary releases.
 
 ## New Features and Fixes
@@ -14,22 +17,22 @@ This repository includes several improvements and fixes merged from upstream pul
 *   **Added sharpyuv encoding** by Galaxy4594 ([PR 190](https://github.com/google/jpegli/pull/190)): Added Sharp YUV chroma downsampling for 4:2:0 subsampling.
 *   **Allow empty DHT marker** by kleisauke ([PR 222](https://github.com/google/jpegli/pull/222)): Allow encoding and decoding empty DHT markers found in real-world progressive JPEGs.
 *   **Enhanced Adaptive Quantization (AQ) & Chroma Preservation**:
-    *   **Active at high qualities**: Upstream jpegli always had AQ enabled no matter the quality level. In `jpegli-redux`, AQ is enabled by default, but its strength is scaled with the compression distance.
-    *   **Smooth quality-based strength tapering**: AQ strength scales smoothly with compression distance:
-        *   Distance 0 (Quality 100): 0% AQ (turns off cleanly, byte-identical to `--noadaptive_quantization`).
-        *   Distance 1.0 (Quality ~90): 50% AQ strength.
-        *   Distance >= 2.0: 100% full AQ strength.
-    *   **Manual AQ scaling (`--aq_scale=FLOAT`)**: Manually controls the AQ scale. If omitted, automatically scales with distance.
-    *   **Visual energy correction & Energy-based RDOQ (`--aq_mode=0|1|2`)**: Mode 2 (default) balances RDOQ deadzoning across channels and applies block AC energy protection and trellis-lite trailing coefficient deadzoning to preserve fine textures and edges. Mode 1 retains exact legacy upstream AQ behavior, and mode 0 disables AQ.
-    *   **Energy-based RDOQ (`--energy_based_rdoq`, `--noenergy_based_rdoq` / `--correct_aq`)**: Protects high-energy AC blocks from over-quantization and applies deadzoning preferentially to trailing EOB coefficients. Enabled by default in `--aq_mode=2`, and disabled in `--aq_mode=1`.
-    *   **Color shift correction (`--color_shift_correction=FLOAT`, `--nocolor_shift_correction`)**: Aligns Cb quantization tables and deadzoning parameters with Cr to prevent color shifts and desaturation in fine warm/yellow details. Enabled by default with automatic warm-pixel detection, or manually adjustable via `[0.0, 1.0]` and toggleable with `--nocolor_shift_correction`.
+    *   **Active at high qualities**: Upstream jpegli always had AQ enabled no matter the quality level. In jpegli-redux, AQ is enabled by default, but its strength is scaled with the compression distance.
+    *   **AQ strength tapering**: AQ strength scales smoothly with compression distance:
+        *   Distance 0 (Quality 100): 0% AQ
+        *   Distance 1.0 (Quality ~90): 50% AQ strength
+        *   Distance >= 2.0: 100% full AQ strength
+    *   **Manual AQ scaling (`--aq_scale`)**: Manually controls the AQ scale. If omitted, automatically scales with distance.
+    *   **AQ modes (`--aq_mode`)**: Mode 2 (default) balances AQ across channels, applies block AC energy protection, and trellis-lite deadzoning to preserve fine textures and edges. Mode 1 retains exact legacy upstream AQ behavior, and mode 0 disables AQ.
+    *   **Energy-based RDOQ (`--energy_based_rdoq`)**: Protects high-energy AC blocks from over-quantization and applies deadzoning preferentially to trailing EOB coefficients. Enabled by default in AQ mode 2, and disabled in AQ mode 1.
+    *   **Color shift correction (`--color_shift_correction`)**: Aligns Cb quantization tables and deadzoning parameters with Cr to prevent color shifts and desaturation in fine warm/yellow details. Enabled by default with automatic warm-pixel detection, or manually adjustable with values ranging from 0-1.
 
 ## Usage
 
-When [building the project](doc/building_and_testing.md), two binaries,
-`tools/cjpegli` and `tools/djpegli` will be built, as well as a
-`lib/jpegli/libjpeg.so.62.3.0` shared library that can be used as a drop-in
-replacement for the system library with the same name.
+When [building the project](doc/building_and_testing.md), CLI tools
+(`tools/cjpegli` and `tools/djpegli`) will be built, as well as the
+`jpegli` static and shared libraries. Note that these libraries are not
+guaranteed or intended to be drop-in binary replacements for system `libjpeg-6.2`.
 
 ## Development process
 

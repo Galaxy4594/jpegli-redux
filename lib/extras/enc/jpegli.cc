@@ -415,6 +415,9 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
     }
     jpegli_set_cicp_transfer_function(&cinfo, cicp_tf);
     jpegli_set_defaults(&cinfo);
+    if (jpeg_settings.rgb) {
+      jpegli_set_colorspace(&cinfo, JCS_RGB);
+    }
     // All factors need to be specified to subsample the blue channel
     // for XYB. H and V are swapped between YCbCr and XYB.
     if (!jpeg_settings.chroma_subsampling.empty()) {
