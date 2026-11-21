@@ -121,13 +121,13 @@ size_t EstimateNumTokens(j_compress_ptr cinfo, size_t mcu_y, size_t ysize_mcus,
                          size_t num_tokens, size_t max_per_row) {
   size_t estimate;
   if (mcu_y == 0) {
-    estimate = 16 * max_per_row;
+    estimate = 4 * max_per_row;
   } else {
     estimate = (4 * ysize_mcus * num_tokens) / (3 * mcu_y);
   }
   size_t mcus_left = ysize_mcus - mcu_y;
   return std::min(mcus_left * max_per_row,
-                  std::max(max_per_row, estimate - num_tokens));
+                  std::max(max_per_row, estimate > num_tokens ? estimate - num_tokens : max_per_row));
 }
 
 namespace {
@@ -210,9 +210,10 @@ void TokenizeACProgressiveScan(j_compress_ptr cinfo, int scan_index,
         ++m->cur_token_array;
         ta = &m->token_arrays[m->cur_token_array];
       }
+      size_t scan_tokens = m->total_num_tokens - sti->token_offset;
       m->num_tokens =
           EstimateNumTokens(cinfo, by, comp->height_in_blocks,
-                            m->total_num_tokens, max_tokens_per_row);
+                            scan_tokens, max_tokens_per_row);
       ta->tokens = Allocate<Token>(cinfo, m->num_tokens, JPOOL_IMAGE);
       m->next_token = ta->tokens;
     }
@@ -939,8 +940,14 @@ struct CandidateScan {
 };
 
 struct PreparedACBlock {
-  uint8_t sizes[64];
   uint64_t nonzero[4];  // AC bitmask (bit 0 clear) for al = 0..3
+  uint8_t sizes[32];    // 4-bit packed bit-lengths (2 positions per byte) -> 64 bytes total
+  inline uint8_t size_at(int k) const {
+    return (sizes[k >> 1] >> ((k & 1) << 2)) & 0xF;
+  }
+  inline void set_size(int k, uint8_t sz) {
+    sizes[k >> 1] |= static_cast<uint8_t>((sz & 0xF) << ((k & 1) << 2));
+  }
 };
 
 inline int TrailingZeros64(uint64_t v) {
@@ -1012,7 +1019,7 @@ uint64_t CostACScan(const std::vector<PreparedACBlock>& blocks,
         int run = k - next;
         emit_eobrun();
         zrl += static_cast<uint32_t>(run >> 4);
-        int size = blk.sizes[k] - scan.al;
+        int size = blk.size_at(k) - scan.al;
         freq[((run & 15) << 4) + size] += 1;
         rbits += static_cast<uint64_t>(size);
         next = k + 1;
@@ -1174,8 +1181,8 @@ void OptimizeProgressiveScanScript(j_compress_ptr cinfo) {
           nz &= nz - 1;
           int v = blk[k];
           uint32_t a = static_cast<uint32_t>(v < 0 ? -v : v);
-          pb.sizes[k] = static_cast<uint8_t>(
-              jpegli::FloorLog2Nonzero<uint32_t>(a) + 1);
+          pb.set_size(k, static_cast<uint8_t>(
+              jpegli::FloorLog2Nonzero<uint32_t>(a) + 1));
         }
         sample.push_back(pb);
       }
