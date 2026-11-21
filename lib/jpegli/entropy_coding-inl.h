@@ -180,23 +180,69 @@ void ComputeTokensForBlock(const T* block, int last_dc, int dc_ctx, int ac_ctx,
     int dc_mask = (1 << dc_nbits) - 1;
     *next_token++ = Token(dc_ctx, dc_nbits, temp2 & dc_mask);
   }
+  if (zig_zag_order) {
+    const HWY_CAPPED(T, 16) d_blk;
+    const size_t N = Lanes(d_blk);
+    const auto zero = Zero(d_blk);
+    uint64_t nz = 0;
+    for (size_t k = 0; k < 64; k += N) {
+      uint8_t mb[2] = {0, 0};
+      StoreMaskBits(d_blk, Ne(LoadU(d_blk, block + k), zero), mb);
+      uint64_t bits =
+          static_cast<uint64_t>(mb[0]) | (static_cast<uint64_t>(mb[1]) << 8);
+      nz |= bits << k;
+    }
+    nz &= ~uint64_t{1};
+    int next_k = 1;
+    while (nz != 0) {
+#if defined(_MSC_VER) && !defined(__clang__)
+      unsigned long k_ul;
+      _BitScanForward64(&k_ul, nz);
+      int k = static_cast<int>(k_ul);
+#else
+      int k = __builtin_ctzll(nz);
+#endif
+      nz &= nz - 1;
+      int r = k - next_k;
+      temp = block[k];
+      if (temp < 0) {
+        temp = -temp;
+        temp2 = ~temp;
+      } else {
+        temp2 = temp;
+      }
+      while (r > 15) {
+        *next_token++ = Token(ac_ctx, 0xf0, 0);
+        r -= 16;
+      }
+      int ac_nbits = jpegli::FloorLog2Nonzero<uint32_t>(temp) + 1;
+      int ac_mask = (1 << ac_nbits) - 1;
+      int symbol = (r << 4u) + ac_nbits;
+      *next_token++ = Token(ac_ctx, symbol, temp2 & ac_mask);
+      next_k = k + 1;
+    }
+    if (next_k < 64) {
+      *next_token++ = Token(ac_ctx, 0, 0);
+    }
+    *tokens_ptr = next_token;
+    return;
+  }
+
   int num_nonzeros = NumNonZero8x8ExceptDC(block);
+  if (num_nonzeros == 0) {
+    *next_token++ = Token(ac_ctx, 0, 0);
+    *tokens_ptr = next_token;
+    return;
+  }
   for (int k = 1; k < 64; ++k) {
     if (num_nonzeros == 0) {
       *next_token++ = Token(ac_ctx, 0, 0);
       break;
     }
     int r = 0;
-    if (zig_zag_order) {
-      while ((temp = block[k]) == 0) {
-        r++;
-        k++;
-      }
-    } else {
-      while ((temp = block[kJPEGNaturalOrder[k]]) == 0) {
-        r++;
-        k++;
-      }
+    while ((temp = block[kJPEGNaturalOrder[k]]) == 0) {
+      r++;
+      k++;
     }
     --num_nonzeros;
     if (temp < 0) {

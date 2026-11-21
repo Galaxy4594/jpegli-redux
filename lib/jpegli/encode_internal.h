@@ -26,8 +26,8 @@ constexpr int kDefaultProgressiveLevel = 0;
 typedef int16_t coeff_t;
 
 struct HuffmanCodeTable {
-  int depth[256];
-  int code[256];
+  uint8_t depth[256];
+  uint32_t code[256];
 };
 
 struct Token {

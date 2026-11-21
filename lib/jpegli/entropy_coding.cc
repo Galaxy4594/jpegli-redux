@@ -40,6 +40,64 @@ void ComputeTokensSequential(const coeff_t* block, int last_dc, int dc_ctx,
                                        tokens_ptr);
 }
 
+void ComputeACMasksSIMD(const coeff_t* block, int al, uint64_t* nz_any_out,
+                        uint64_t* nz_cur_out) {
+  const HWY_CAPPED(int16_t, 16) d16;
+  const size_t N = Lanes(d16);
+  const auto zero = Zero(d16);
+  const auto thresh = Set(d16, static_cast<int16_t>(1 << al));
+  uint64_t nz_any = 0;
+  uint64_t nz_cur = 0;
+  for (size_t k = 0; k < DCTSIZE2; k += N) {
+    const auto v = LoadU(d16, block + k);
+    const auto m_any = Ne(v, zero);
+    uint8_t b_any[2] = {0, 0};
+    StoreMaskBits(d16, m_any, b_any);
+    uint64_t bits_any =
+        static_cast<uint64_t>(b_any[0]) | (static_cast<uint64_t>(b_any[1]) << 8);
+    nz_any |= bits_any << k;
+    if (al > 0) {
+      const auto m_cur = Ge(Abs(v), thresh);
+      uint8_t b_cur[2] = {0, 0};
+      StoreMaskBits(d16, m_cur, b_cur);
+      uint64_t bits_cur = static_cast<uint64_t>(b_cur[0]) |
+                          (static_cast<uint64_t>(b_cur[1]) << 8);
+      nz_cur |= bits_cur << k;
+    }
+  }
+  *nz_any_out = nz_any;
+  *nz_cur_out = (al > 0) ? nz_cur : nz_any;
+}
+
+void ComputeACMultiMasksSIMD(const coeff_t* block, uint64_t nz_out[4]) {
+  const HWY_CAPPED(int16_t, 16) d16;
+  const size_t N = Lanes(d16);
+  const auto v1 = Set(d16, 1);
+  const auto v2 = Set(d16, 2);
+  const auto v4 = Set(d16, 4);
+  const auto v8 = Set(d16, 8);
+  uint64_t nz0 = 0, nz1 = 0, nz2 = 0, nz3 = 0;
+  for (size_t k = 0; k < DCTSIZE2; k += N) {
+    const auto a = Abs(LoadU(d16, block + k));
+    uint8_t b[2] = {0, 0};
+    StoreMaskBits(d16, Ge(a, v1), b);
+    nz0 |= (static_cast<uint64_t>(b[0]) | (static_cast<uint64_t>(b[1]) << 8)) << k;
+    b[0] = b[1] = 0;
+    StoreMaskBits(d16, Ge(a, v2), b);
+    nz1 |= (static_cast<uint64_t>(b[0]) | (static_cast<uint64_t>(b[1]) << 8)) << k;
+    b[0] = b[1] = 0;
+    StoreMaskBits(d16, Ge(a, v4), b);
+    nz2 |= (static_cast<uint64_t>(b[0]) | (static_cast<uint64_t>(b[1]) << 8)) << k;
+    b[0] = b[1] = 0;
+    StoreMaskBits(d16, Ge(a, v8), b);
+    nz3 |= (static_cast<uint64_t>(b[0]) | (static_cast<uint64_t>(b[1]) << 8)) << k;
+  }
+  nz_out[0] = nz0 & ~uint64_t{1};
+  nz_out[1] = nz1 & ~uint64_t{1};
+  nz_out[2] = nz2 & ~uint64_t{1};
+  nz_out[3] = nz3 & ~uint64_t{1};
+}
+
 // NOLINTNEXTLINE(google-readability-namespace-comments)
 }  // namespace HWY_NAMESPACE
 }  // namespace jpegli
@@ -74,6 +132,26 @@ size_t EstimateNumTokens(j_compress_ptr cinfo, size_t mcu_y, size_t ysize_mcus,
 
 namespace {
 HWY_EXPORT(ComputeTokensSequential);
+HWY_EXPORT(ComputeACMasksSIMD);
+HWY_EXPORT(ComputeACMultiMasksSIMD);
+
+inline int TrailingZeros64Fast(uint64_t v) {
+#if defined(_MSC_VER) && !defined(__clang__)
+  unsigned long idx;
+  _BitScanForward64(&idx, v);
+  return static_cast<int>(idx);
+#else
+  return __builtin_ctzll(v);
+#endif
+}
+
+inline int PopCount64Fast(uint64_t v) {
+#if defined(_MSC_VER) && !defined(__clang__)
+  return static_cast<int>(__popcnt64(v));
+#else
+  return __builtin_popcountll(v);
+#endif
+}
 
 void TokenizeProgressiveDC(const coeff_t* coeffs, int context, int Al,
                            coeff_t* last_dc_coeff, Token** next_token) {
@@ -146,17 +224,21 @@ void TokenizeACProgressiveScan(j_compress_ptr cinfo, int scan_index,
         restarts_to_go = restart_interval;
       }
       const coeff_t* block = &blocks[0][bx][0];
-      coeff_t temp2;
-      coeff_t temp;
-      int r = 0;
+      uint64_t nz_any = 0, nz_cur = 0;
+      HWY_DYNAMIC_DISPATCH(ComputeACMasksSIMD)(block, Al, &nz_any, &nz_cur);
+      const uint64_t band =
+          (~uint64_t{0} << Ss) & (~uint64_t{0} >> (63 - Se));
+      uint64_t nz = nz_cur & band;
+      int num_future_nzeros =
+          (Al > 0) ? PopCount64Fast((nz_any & ~nz_cur) & band) : 0;
       int num_nzeros = 0;
-      int num_future_nzeros = 0;
-      for (int k = Ss; k <= Se; ++k) {
-        temp = block[k];
-        if (temp == 0) {
-          r++;
-          continue;
-        }
+      int next_k = Ss;
+      while (nz != 0) {
+        int k = TrailingZeros64Fast(nz);
+        nz &= nz - 1;
+        int r = k - next_k;
+        coeff_t temp = block[k];
+        coeff_t temp2;
         if (temp < 0) {
           temp = -temp;
           temp >>= Al;
@@ -164,11 +246,6 @@ void TokenizeACProgressiveScan(j_compress_ptr cinfo, int scan_index,
         } else {
           temp >>= Al;
           temp2 = temp;
-        }
-        if (temp == 0) {
-          r++;
-          num_future_nzeros++;
-          continue;
         }
         if (eob_run > 0) emit_eob_run();
         while (r > 15) {
@@ -179,9 +256,9 @@ void TokenizeACProgressiveScan(j_compress_ptr cinfo, int scan_index,
         int symbol = (r << 4u) + nbits;
         *m->next_token++ = Token(context, symbol, temp2 & ((1 << nbits) - 1));
         ++num_nzeros;
-        r = 0;
+        next_k = k + 1;
       }
-      if (r > 0) {
+      if (next_k <= Se) {
         ++eob_run;
         if (eob_run == 0x7FFF) emit_eob_run();
       }
@@ -238,24 +315,26 @@ void TokenizeACRefinementScan(j_compress_ptr cinfo, int scan_index,
         eob_run = eob_refbits = 0;
       }
       const coeff_t* block = &blocks[0][bx][0];
+      uint64_t nz_any = 0, nz_cur = 0;
+      HWY_DYNAMIC_DISPATCH(ComputeACMasksSIMD)(block, Al, &nz_any, &nz_cur);
+      const uint64_t band =
+          (~uint64_t{0} << Ss) & (~uint64_t{0} >> (63 - Se));
+      uint64_t nz = nz_cur & band;
       int num_eob_refinement_bits = 0;
       int num_refinement_bits = 0;
       int num_nzeros = 0;
       int r = 0;
-      for (int k = Ss; k <= Se; ++k) {
+      int next_k = Ss;
+      while (nz != 0) {
+        int k = TrailingZeros64Fast(nz);
+        nz &= nz - 1;
+        r += k - next_k;
+        next_k = k + 1;
         int absval = block[k];
-        if (absval == 0) {
-          r++;
-          continue;
-        }
         const int mask = absval >> (8 * sizeof(int) - 1);
         absval += mask;
         absval ^= mask;
         absval >>= Al;
-        if (absval == 0) {
-          r++;
-          continue;
-        }
         while (r > 15) {
           token.symbol = 0xf0;
           token.refbits = num_refinement_bits;
@@ -280,6 +359,7 @@ void TokenizeACRefinementScan(j_compress_ptr cinfo, int scan_index,
         next_eob_token = next_token;
         eob_run = eob_refbits = 0;
       }
+      r += (Se + 1) - next_k;
       if (r > 0 || num_eob_refinement_bits + num_refinement_bits > 0) {
         ++eob_run;
         eob_refbits += num_eob_refinement_bits + num_refinement_bits;
@@ -1087,23 +1167,16 @@ void OptimizeProgressiveScanScript(j_compress_ptr cinfo) {
         if ((idx % stride) != 0) continue;
         const coeff_t* blk = &blocks[0][bx][0];
         PreparedACBlock pb = {};
-        uint64_t nz0 = 0, nz1 = 0, nz2 = 0, nz3 = 0;
-        for (int k = 1; k < DCTSIZE2; ++k) {
+        HWY_DYNAMIC_DISPATCH(ComputeACMultiMasksSIMD)(blk, pb.nonzero);
+        uint64_t nz = pb.nonzero[0];
+        while (nz != 0) {
+          int k = TrailingZeros64Fast(nz);
+          nz &= nz - 1;
           int v = blk[k];
-          if (v == 0) continue;
           uint32_t a = static_cast<uint32_t>(v < 0 ? -v : v);
-          uint8_t sz = static_cast<uint8_t>(jpegli::FloorLog2Nonzero<uint32_t>(a) + 1);
-          pb.sizes[k] = sz;
-          uint64_t bit = uint64_t{1} << k;
-          nz0 |= bit;
-          if (sz > 1) nz1 |= bit;
-          if (sz > 2) nz2 |= bit;
-          if (sz > 3) nz3 |= bit;
+          pb.sizes[k] = static_cast<uint8_t>(
+              jpegli::FloorLog2Nonzero<uint32_t>(a) + 1);
         }
-        pb.nonzero[0] = nz0;
-        pb.nonzero[1] = nz1;
-        pb.nonzero[2] = nz2;
-        pb.nonzero[3] = nz3;
         sample.push_back(pb);
       }
     }

@@ -339,26 +339,29 @@ void WriteTokens(j_compress_ptr cinfo, int scan_index, JpegBitWriter* bw) {
           total_tokens < sti.token_offset ? sti.token_offset - total_tokens : 0;
       size_t end_ix = std::min(sti.token_offset + sti.num_tokens - total_tokens,
                                num_tokens);
-      size_t cycle_len = bw->len / 8;
-      size_t next_cycle = cycle_len;
-      for (size_t i = start_ix; i < end_ix; ++i) {
+      const size_t cycle_len = bw->len / 8;
+      size_t i = start_ix;
+      while (i < end_ix) {
         if (total_tokens + i == next_restart) {
           JumpToByteBoundary(bw);
           EmitMarker(bw, 0xD0 + next_restart_marker);
-          next_restart_marker += 1;
-          next_restart_marker &= 0x7;
+          next_restart_marker = (next_restart_marker + 1) & 0x7;
           next_restart = sti.restarts[++restart_idx];
         }
-        Token t = tokens[i];
-        const HuffmanCodeTable* code = &coding_tables[context_map[t.context]];
-        WriteBits(bw, code->depth[t.symbol], code->code[t.symbol] | t.bits);
-        if (--next_cycle == 0) {
-          if (!EmptyBitWriterBuffer(bw)) {
-            JPEGLI_ERROR(
-                "Output suspension is not supported in "
-                "finish_compress");
-          }
-          next_cycle = cycle_len;
+        size_t chunk_end = std::min(end_ix, i + cycle_len);
+        if (next_restart > total_tokens + i &&
+            next_restart < total_tokens + chunk_end) {
+          chunk_end = next_restart - total_tokens;
+        }
+        for (; i < chunk_end; ++i) {
+          const Token t = tokens[i];
+          const HuffmanCodeTable* code = &coding_tables[context_map[t.context]];
+          WriteBits(bw, code->depth[t.symbol], code->code[t.symbol] | t.bits);
+        }
+        if (!EmptyBitWriterBuffer(bw)) {
+          JPEGLI_ERROR(
+              "Output suspension is not supported in "
+              "finish_compress");
         }
       }
     }
@@ -399,8 +402,15 @@ void WriteACRefinementTokens(j_compress_ptr cinfo, int scan_index,
       bits = (t.symbol >> 1) & 1;
     }
     WriteBits(bw, code->depth[symbol], code->code[symbol] | bits);
-    for (int j = 0; j < t.refbits; ++j) {
-      WriteBits(bw, 1, sti.refbits[refbit_idx++]);
+    int rem = t.refbits;
+    while (rem > 0) {
+      int chunk = std::min(rem, 16);
+      uint32_t acc = 0;
+      for (int j = 0; j < chunk; ++j) {
+        acc = (acc << 1) | sti.refbits[refbit_idx++];
+      }
+      WriteBits(bw, chunk, acc);
+      rem -= chunk;
     }
     if (--next_cycle == 0) {
       if (!EmptyBitWriterBuffer(bw)) {

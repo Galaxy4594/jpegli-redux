@@ -291,6 +291,7 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
       break;
     }
   }
+  if (last_z == 0) return;
 
   // In shadow/dark regions (dct[0] < 45), human contrast sensitivity to blockiness
   // and contouring is high (Weber-Fechner effect in low light). Scale down
@@ -308,10 +309,24 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
   const bool is_luma = (zero_bias_offset[63] > 0.585f);
   float darkness = 0.0f;
   if (wasserstein_quant && is_luma) {
-    // Smooth Weber-Fechner brightness tilt on Luma: protect darker blocks
-    // from banding and gently reclaim bits in bright highlights.
+    // Smooth Weber-Fechner brightness tilt on Luma via a fast 256-entry LUT
+    // for pow(clamp(dct[0], 16, 255) / 128.0f, 0.40f) with linear interpolation.
+    static const auto kLumaTiltLut = []() {
+      struct Lut { float v[256]; } lut{};
+      for (int i = 0; i < 256; ++i) {
+        float m = static_cast<float>(i < 16 ? 16 : i);
+        lut.v[i] = std::pow(m / 128.0f, 0.40f);
+      }
+      return lut;
+    }();
     float luma_mean = std::max(16.0f, std::min(255.0f, dct[0]));
-    effective_aq *= std::pow(luma_mean / 128.0f, 0.40f);
+    int idx = static_cast<int>(luma_mean);
+    float frac = luma_mean - static_cast<float>(idx);
+    float tilt = (idx < 255)
+                     ? (kLumaTiltLut.v[idx] +
+                        frac * (kLumaTiltLut.v[idx + 1] - kLumaTiltLut.v[idx]))
+                     : kLumaTiltLut.v[255];
+    effective_aq *= tilt;
     if (dct[0] < 64.0f) {
       darkness = (64.0f - std::max(0.0f, dct[0])) / 64.0f;
     }
@@ -329,14 +344,20 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
     aggr_threshold = std::min(aggr_threshold, max_deadzone);
 
     if (wasserstein_quant && is_luma) {
-      int u = k / 8;
-      int v = k % 8;
-      // Sobolev H^-1 / 2-Wasserstein radial transport weight on Luma:
-      // preserves trailing Luma AC variance and HF texture envelopes (m1 ~= m0)
-      // without bloating Chroma EOB runs.
-      float transport_w = 1.0f / std::sqrt(1.0f + 0.10f * (u * u + v * v));
+      // Precomputed Sobolev H^-1 / 2-Wasserstein radial transport weights:
+      // 1.0f / std::sqrt(1.0f + 0.10f * (u * u + v * v)) for u=k/8, v=k%8.
+      static constexpr float kTransportW[DCTSIZE2] = {
+          1.0000000f, 0.9534626f, 0.8451543f, 0.7254763f, 0.6201737f, 0.5345225f, 0.4662524f, 0.4116935f,
+          0.9534626f, 0.9128709f, 0.8164966f, 0.7071068f, 0.6085806f, 0.5270463f, 0.4612656f, 0.4082483f,
+          0.8451543f, 0.8164966f, 0.7453560f, 0.6593805f, 0.5773503f, 0.5063697f, 0.4472136f, 0.3984095f,
+          0.7254763f, 0.7071068f, 0.6593805f, 0.5976143f, 0.5345225f, 0.4767313f, 0.4264014f, 0.3834825f,
+          0.6201737f, 0.6085806f, 0.5773503f, 0.5345225f, 0.4879500f, 0.4428074f, 0.4016097f, 0.3651484f,
+          0.5345225f, 0.5270463f, 0.5063697f, 0.4767313f, 0.4428074f, 0.4082483f, 0.3752933f, 0.3450328f,
+          0.4662524f, 0.4612656f, 0.4472136f, 0.4264014f, 0.4016097f, 0.3752933f, 0.3492151f, 0.3244428f,
+          0.4116935f, 0.4082483f, 0.3984095f, 0.3834825f, 0.3651484f, 0.3450328f, 0.3244428f, 0.3042903f,
+      };
       float transport_scale = 0.40f + 0.15f * darkness;
-      aggr_threshold *= (1.0f - transport_scale * transport_w);
+      aggr_threshold *= (1.0f - transport_scale * kTransportW[k]);
     }
 
     if (std::abs(qval[k]) < aggr_threshold) {
@@ -357,6 +378,24 @@ JPEGLI_INLINE void ContinueWhiteClipLuma(const float* JPEGLI_RESTRICT pixels,
                                          const float* JPEGLI_RESTRICT qmc,
                                          float* JPEGLI_RESTRICT dct,
                                          float* JPEGLI_RESTRICT scratch_space) {
+  // Fast SIMD check: >95% of blocks contain zero pure-white pixels.
+  const HWY_CAPPED(float, 8) d8;
+  const auto white_thresh = Set(d8, 254.5f);
+  bool any_white = false;
+  for (int y = 0; y < 8; ++y) {
+    const float* row = pixels + y * stride;
+    for (size_t x = 0; x < 8; x += Lanes(d8)) {
+      if (!AllFalse(d8, Ge(LoadU(d8, row + x), white_thresh))) {
+        any_white = true;
+        break;
+      }
+    }
+    if (any_white) break;
+  }
+  if (!any_white) {
+    TransformFromPixels(pixels, stride, dct, scratch_space);
+    return;
+  }
   int white_count = 0;
   HWY_ALIGN float target[64];
   bool is_white[64];
