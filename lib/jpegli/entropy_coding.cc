@@ -846,5 +846,371 @@ void InitEntropyCoder(j_compress_ptr cinfo) {
   }
 }
 
+namespace {
+
+struct CandidateScan {
+  uint8_t ss;
+  uint8_t se;
+  uint8_t ah;
+  uint8_t al;
+  bool operator==(const CandidateScan& o) const {
+    return ss == o.ss && se == o.se && ah == o.ah && al == o.al;
+  }
+};
+
+struct PreparedACBlock {
+  uint8_t sizes[64];
+  uint64_t nonzero[4];  // AC bitmask (bit 0 clear) for al = 0..3
+};
+
+inline int TrailingZeros64(uint64_t v) {
+#if defined(_MSC_VER) && !defined(__clang__)
+  unsigned long idx;
+  _BitScanForward64(&idx, v);
+  return static_cast<int>(idx);
+#else
+  return __builtin_ctzll(v);
+#endif
+}
+
+inline int LeadingZeros64(uint64_t v) {
+#if defined(_MSC_VER) && !defined(__clang__)
+  unsigned long idx;
+  _BitScanReverse64(&idx, v);
+  return 63 - static_cast<int>(idx);
+#else
+  return __builtin_clzll(v);
+#endif
+}
+
+inline int PopCount64(uint64_t v) {
+#if defined(_MSC_VER) && !defined(__clang__)
+  return static_cast<int>(__popcnt64(v));
+#else
+  return __builtin_popcountll(v);
+#endif
+}
+
+uint64_t CostACScan(const std::vector<PreparedACBlock>& blocks,
+                    const CandidateScan& scan, size_t restart_interval,
+                    size_t stride) {
+  uint32_t freq[257] = {};
+  freq[256] = 1;  // Sentinel for all-1s code
+  uint64_t raw_bits = 0;
+  uint64_t restarts = 0;
+  uint32_t eobrun = 0;
+  size_t pending_ref = 0;
+
+  const auto emit_eobrun = [&]() {
+    if (eobrun > 0) {
+      int nbits = jpegli::FloorLog2Nonzero<uint32_t>(eobrun);
+      freq[nbits << 4] += 1;
+      raw_bits += static_cast<uint64_t>(nbits) + pending_ref;
+      eobrun = 0;
+      pending_ref = 0;
+    }
+  };
+
+  const uint64_t band = (~uint64_t{0} << scan.ss) & (~uint64_t{0} >> (63 - scan.se));
+  const bool is_refine = (scan.ah > 0);
+  const size_t nblocks = blocks.size();
+
+  for (size_t b = 0; b < nblocks; ++b) {
+    if (restart_interval > 0 && b > 0 && (b % restart_interval) == 0) {
+      emit_eobrun();
+      ++restarts;
+    }
+    const PreparedACBlock& blk = blocks[b];
+    uint64_t nz = blk.nonzero[scan.al] & band;
+    int next = scan.ss;
+    if (!is_refine) {
+      uint32_t zrl = 0;
+      uint64_t rbits = 0;
+      while (nz != 0) {
+        int k = TrailingZeros64(nz);
+        nz &= nz - 1;
+        int run = k - next;
+        emit_eobrun();
+        zrl += static_cast<uint32_t>(run >> 4);
+        int size = blk.sizes[k] - scan.al;
+        freq[((run & 15) << 4) + size] += 1;
+        rbits += static_cast<uint64_t>(size);
+        next = k + 1;
+      }
+      freq[0xF0] += zrl;
+      raw_bits += rbits;
+      if (next <= scan.se) {
+        ++eobrun;
+        if (eobrun == 0x7FFF) emit_eobrun();
+      }
+    } else {
+      uint64_t newer = nz & ~blk.nonzero[scan.al + 1];
+      uint64_t older = nz & ~newer;
+      uint64_t waiting = older;
+      if (newer != 0) {
+        emit_eobrun();
+        int eob = 63 - LeadingZeros64(newer);
+        uint64_t sent = older & (~uint64_t{0} >> (63 - eob));
+        waiting &= ~sent;
+        raw_bits += static_cast<uint64_t>(PopCount64(newer) + PopCount64(sent));
+        uint32_t zrl = 0;
+        uint64_t rest = newer;
+        while (rest != 0) {
+          int k = TrailingZeros64(rest);
+          rest &= rest - 1;
+          uint64_t between = (~uint64_t{0} << next) & ~(~uint64_t{0} << k);
+          int zeros = k - next - PopCount64(older & between);
+          zrl += static_cast<uint32_t>(zeros >> 4);
+          freq[((zeros & 15) << 4) + 1] += 1;
+          next = k + 1;
+        }
+        freq[0xF0] += zrl;
+      }
+      if ((newer & (uint64_t{1} << scan.se)) == 0) {
+        ++eobrun;
+        pending_ref += static_cast<size_t>(PopCount64(waiting));
+        if (eobrun == 0x7FFF || pending_ref > 65000) emit_eobrun();
+      }
+    }
+  }
+  emit_eobrun();
+
+  uint8_t depth[257] = {};
+  uint32_t sym_count = 0;
+  for (int s = 0; s < 256; ++s) {
+    if (freq[s] > 0) ++sym_count;
+  }
+  if (sym_count == 0) {
+    freq[0] = 1;
+    sym_count = 1;
+  }
+  CreateHuffmanTree(freq, 257, kJpegHuffmanMaxBitLength, depth);
+
+  uint64_t huff_bits = 0;
+  for (int s = 0; s < 256; ++s) {
+    if (freq[s] > 0) {
+      huff_bits += static_cast<uint64_t>(freq[s]) * depth[s];
+    }
+  }
+  // Scale sampled payload bits back by stride; add exact unscaled SOS + DHT header overhead.
+  uint64_t payload_bits = (huff_bits + raw_bits + restarts * 23) * stride + 7;
+  uint64_t header_bits = (10 + 2 + 2 + 1 + 16 + sym_count) * 8;
+  return payload_bits + header_bits;
+}
+
+std::vector<std::vector<CandidateScan>> BuildCandidateACScripts(bool is_luma) {
+  std::vector<std::vector<CandidateScan>> scripts;
+  auto add_partition = [&](const std::vector<std::pair<uint8_t, uint8_t>>& bands,
+                           uint8_t depth) {
+    std::vector<CandidateScan> s;
+    for (const auto& b : bands) {
+      s.push_back({b.first, b.second, 0, depth});
+    }
+    for (int al = depth; al > 0; --al) {
+      s.push_back({1, 63, static_cast<uint8_t>(al), static_cast<uint8_t>(al - 1)});
+    }
+    scripts.push_back(std::move(s));
+  };
+
+  if (is_luma) {
+    const std::vector<std::vector<std::pair<uint8_t, uint8_t>>> parts = {
+        {{1, 63}},
+        {{1, 5}, {6, 63}},
+        {{1, 2}, {3, 63}},
+        {{1, 2}, {3, 9}, {10, 63}},
+        {{1, 8}, {9, 63}},
+        {{1, 5}, {6, 17}, {18, 63}},
+        {{1, 3}, {4, 12}, {13, 63}},
+    };
+    for (uint8_t depth : {0, 1, 2}) {
+      for (const auto& p : parts) add_partition(p, depth);
+    }
+    // Include jpegli's native -p 2 hybrid scripts so -p 3 is always <= -p 2.
+    scripts.push_back({{1, 2, 0, 0}, {3, 63, 0, 2}, {3, 63, 2, 1}, {3, 63, 1, 0}});
+    scripts.push_back({{1, 2, 0, 0}, {3, 63, 0, 1}, {3, 63, 1, 0}});
+    scripts.push_back({{1, 5, 0, 0}, {6, 63, 0, 1}, {6, 63, 1, 0}});
+    scripts.push_back({{1, 5, 0, 0}, {6, 63, 0, 2}, {6, 63, 2, 1}, {6, 63, 1, 0}});
+  } else {
+    const std::vector<std::vector<std::pair<uint8_t, uint8_t>>> parts = {
+        {{1, 63}},
+        {{1, 5}, {6, 63}},
+        {{1, 2}, {3, 63}},
+    };
+    for (uint8_t depth : {0, 1}) {
+      for (const auto& p : parts) add_partition(p, depth);
+    }
+    scripts.push_back({{1, 2, 0, 0}, {3, 63, 0, 2}, {3, 63, 2, 1}, {3, 63, 1, 0}});
+    scripts.push_back({{1, 2, 0, 0}, {3, 63, 0, 1}, {3, 63, 1, 0}});
+    scripts.push_back({{1, 5, 0, 0}, {6, 63, 0, 1}, {6, 63, 1, 0}});
+  }
+  return scripts;
+}
+
+}  // namespace
+
+void OptimizeProgressiveScanScript(j_compress_ptr cinfo) {
+  jpeg_comp_master* m = cinfo->master;
+  static constexpr size_t kRaceStride = 2;
+
+  std::vector<jpeg_scan_info> new_scans;
+  // DC scan(s): interleave for 4:4:4 (max_h == 1 && max_v == 1), separate otherwise.
+  const bool interleave_dc =
+      (cinfo->max_h_samp_factor == 1 && cinfo->max_v_samp_factor == 1);
+  const int dc_comps = interleave_dc ? MAX_COMPS_IN_SCAN : 1;
+  for (int c = 0; c < cinfo->num_components; c += dc_comps) {
+    jpeg_scan_info si = {};
+    si.Ss = 0;
+    si.Se = 0;
+    si.Ah = 0;
+    si.Al = 0;
+    si.comps_in_scan = std::min(dc_comps, cinfo->num_components - c);
+    for (int j = 0; j < si.comps_in_scan; ++j) {
+      si.component_index[j] = c + j;
+    }
+    new_scans.push_back(si);
+  }
+
+  for (int c = 0; c < cinfo->num_components; ++c) {
+    const jpeg_component_info* comp = &cinfo->comp_info[c];
+    const size_t total_blocks =
+        static_cast<size_t>(comp->height_in_blocks) * comp->width_in_blocks;
+    const size_t stride = total_blocks > 256 ? kRaceStride : 1;
+    std::vector<PreparedACBlock> sample;
+    sample.reserve(DivCeil(total_blocks, stride));
+
+    size_t idx = 0;
+    for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
+      JBLOCKARRAY blocks = (*cinfo->mem->access_virt_barray)(
+          reinterpret_cast<j_common_ptr>(cinfo), m->coeff_buffers[c], by, 1,
+          FALSE);
+      for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx, ++idx) {
+        if ((idx % stride) != 0) continue;
+        const coeff_t* blk = &blocks[0][bx][0];
+        PreparedACBlock pb = {};
+        uint64_t nz0 = 0, nz1 = 0, nz2 = 0, nz3 = 0;
+        for (int k = 1; k < DCTSIZE2; ++k) {
+          int v = blk[k];
+          if (v == 0) continue;
+          uint32_t a = static_cast<uint32_t>(v < 0 ? -v : v);
+          uint8_t sz = static_cast<uint8_t>(jpegli::FloorLog2Nonzero<uint32_t>(a) + 1);
+          pb.sizes[k] = sz;
+          uint64_t bit = uint64_t{1} << k;
+          nz0 |= bit;
+          if (sz > 1) nz1 |= bit;
+          if (sz > 2) nz2 |= bit;
+          if (sz > 3) nz3 |= bit;
+        }
+        pb.nonzero[0] = nz0;
+        pb.nonzero[1] = nz1;
+        pb.nonzero[2] = nz2;
+        pb.nonzero[3] = nz3;
+        sample.push_back(pb);
+      }
+    }
+
+    size_t restart_interval = 0;
+    if (cinfo->restart_in_rows <= 0) {
+      restart_interval = cinfo->restart_interval;
+    } else {
+      restart_interval = std::min<size_t>(
+          static_cast<size_t>(comp->width_in_blocks) * cinfo->restart_in_rows,
+          65535u);
+    }
+    size_t sampled_restart =
+        restart_interval > 0 ? DivCeil(restart_interval, stride) : 0;
+
+    const auto candidates = BuildCandidateACScripts(c == 0);
+    std::vector<std::pair<CandidateScan, uint64_t>> cache;
+    cache.reserve(32);
+    const auto get_cost = [&](const CandidateScan& sc) -> uint64_t {
+      for (const auto& entry : cache) {
+        if (entry.first == sc) return entry.second;
+      }
+      uint64_t cost = CostACScan(sample, sc, sampled_restart, stride);
+      cache.emplace_back(sc, cost);
+      return cost;
+    };
+
+    uint64_t best_cost = std::numeric_limits<uint64_t>::max();
+    size_t best_idx = 0;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      uint64_t total = 0;
+      for (const auto& sc : candidates[i]) {
+        total += get_cost(sc);
+      }
+      if (total < best_cost) {
+        best_cost = total;
+        best_idx = i;
+      }
+    }
+
+    for (const auto& sc : candidates[best_idx]) {
+      jpeg_scan_info si = {};
+      si.comps_in_scan = 1;
+      si.component_index[0] = c;
+      si.Ss = sc.ss;
+      si.Se = sc.se;
+      si.Ah = sc.ah;
+      si.Al = sc.al;
+      new_scans.push_back(si);
+    }
+  }
+
+  cinfo->script_space_size = static_cast<int>(new_scans.size());
+  cinfo->script_space =
+      Allocate<jpeg_scan_info>(cinfo, cinfo->script_space_size, JPOOL_IMAGE);
+  memcpy(cinfo->script_space, new_scans.data(),
+         new_scans.size() * sizeof(jpeg_scan_info));
+  cinfo->scan_info = cinfo->script_space;
+  cinfo->num_scans = cinfo->script_space_size;
+
+  // Rebuild scan_token_info, ac_ctx_offset, and num_contexts for the chosen script.
+  m->scan_token_info =
+      Allocate<ScanTokenInfo>(cinfo, cinfo->num_scans, JPOOL_IMAGE);
+  memset(m->scan_token_info, 0, cinfo->num_scans * sizeof(ScanTokenInfo));
+  m->ac_ctx_offset = Allocate<uint8_t>(cinfo, cinfo->num_scans, JPOOL_IMAGE);
+  size_t num_ac_contexts = 0;
+  for (int i = 0; i < cinfo->num_scans; ++i) {
+    const jpeg_scan_info* scan_info = &cinfo->scan_info[i];
+    m->ac_ctx_offset[i] = 4 + num_ac_contexts;
+    if (scan_info->Se > 0) {
+      num_ac_contexts += scan_info->comps_in_scan;
+    }
+    ScanTokenInfo* sti = &m->scan_token_info[i];
+    if (scan_info->comps_in_scan == 1) {
+      int comp_idx = scan_info->component_index[0];
+      jpeg_component_info* comp = &cinfo->comp_info[comp_idx];
+      sti->MCUs_per_row = comp->width_in_blocks;
+      sti->MCU_rows_in_scan = comp->height_in_blocks;
+      sti->blocks_in_MCU = 1;
+    } else {
+      sti->MCUs_per_row =
+          DivCeil(cinfo->image_width, DCTSIZE * cinfo->max_h_samp_factor);
+      sti->MCU_rows_in_scan =
+          DivCeil(cinfo->image_height, DCTSIZE * cinfo->max_v_samp_factor);
+      sti->blocks_in_MCU = 0;
+      for (int j = 0; j < scan_info->comps_in_scan; ++j) {
+        int comp_idx = scan_info->component_index[j];
+        jpeg_component_info* comp = &cinfo->comp_info[comp_idx];
+        sti->blocks_in_MCU +=
+            static_cast<size_t>(comp->h_samp_factor) * comp->v_samp_factor;
+      }
+    }
+    size_t num_MCUs = sti->MCU_rows_in_scan * sti->MCUs_per_row;
+    sti->num_blocks = num_MCUs * sti->blocks_in_MCU;
+    if (cinfo->restart_in_rows <= 0) {
+      sti->restart_interval = cinfo->restart_interval;
+    } else {
+      sti->restart_interval =
+          std::min<size_t>(sti->MCUs_per_row * cinfo->restart_in_rows, 65535u);
+    }
+    sti->num_restarts = sti->restart_interval > 0
+                            ? DivCeil(num_MCUs, sti->restart_interval)
+                            : 1;
+    sti->restarts = Allocate<size_t>(cinfo, sti->num_restarts, JPOOL_IMAGE);
+  }
+  m->num_contexts = 4 + num_ac_contexts;
+}
+
 }  // namespace jpegli
 #endif  // HWY_ONCE

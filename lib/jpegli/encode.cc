@@ -1374,6 +1374,9 @@ void jpegli_finish_compress(j_compress_ptr cinfo) {
       tokens_done && !FROM_JPEGLI_BOOL(cinfo->optimize_coding);
 
   if (!tokens_done) {
+    if (m->progressive_level >= 3 && cinfo->progressive_mode) {
+      jpegli::OptimizeProgressiveScanScript(cinfo);
+    }
     jpegli::TokenizeJpeg(cinfo);
   }
 

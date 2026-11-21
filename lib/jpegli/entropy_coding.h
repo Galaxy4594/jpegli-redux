@@ -20,6 +20,8 @@ size_t EstimateNumTokens(j_compress_ptr cinfo, size_t mcu_y, size_t ysize_mcus,
 
 void TokenizeJpeg(j_compress_ptr cinfo);
 
+void OptimizeProgressiveScanScript(j_compress_ptr cinfo);
+
 void CopyHuffmanTables(j_compress_ptr cinfo);
 
 void OptimizeHuffmanCodes(j_compress_ptr cinfo);

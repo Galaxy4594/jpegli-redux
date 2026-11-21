@@ -69,8 +69,8 @@ struct Args {
 
     cmdline->AddOptionValue(
         'p', "progressive_level", "N",
-        "Progressive level setting. Range: 0 .. 2.\n"
-        "    Default: 2. Higher number is more scans, 0 means sequential.",
+        "Progressive level setting. Range: 0 .. 3.\n"
+        "    Default: 2. 0=sequential, 3=per-component optimal scan search.",
         &settings.progressive_level, &ParseSigned);
 
     cmdline->AddOptionFlag('\0', "xyb", "Convert to XYB colorspace",
@@ -204,7 +204,7 @@ bool ValidateArgs(const Args& args) {
     fprintf(stderr, "Invalid --chroma_subsampling argument\n");
     return false;
   }
-  if (settings.progressive_level < 0 || settings.progressive_level > 2) {
+  if (settings.progressive_level < 0 || settings.progressive_level > 3) {
     fprintf(stderr, "Invalid --progressive_level argument\n");
     return false;
   }
