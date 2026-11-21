@@ -307,8 +307,14 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
   // misclassified as dark shadows.
   const bool is_luma = (zero_bias_offset[63] > 0.585f);
   float darkness = 0.0f;
-  if (wasserstein_quant && is_luma && dct[0] < 64.0f) {
-    darkness = (64.0f - std::max(0.0f, dct[0])) / 64.0f;
+  if (wasserstein_quant && is_luma) {
+    // Smooth Weber-Fechner brightness tilt on Luma: protect darker blocks
+    // from banding and gently reclaim bits in bright highlights.
+    float luma_mean = std::max(16.0f, std::min(255.0f, dct[0]));
+    effective_aq *= std::pow(luma_mean / 128.0f, 0.40f);
+    if (dct[0] < 64.0f) {
+      darkness = (64.0f - std::max(0.0f, dct[0])) / 64.0f;
+    }
   }
 
   // Only apply aggressive dead-zoning to trailing coefficients backwards from
@@ -341,6 +347,76 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
   }
 }
 
+
+// White-pixel clip continuation for Luma blocks containing saturated white
+// (Y >= 254.5) next to non-white content. Since decoders clamp reconstructed
+// samples to [0, 255], allowing white pixels to overshoot slightly reduces
+// ringing and bit cost around high-contrast edges for zero visible error.
+JPEGLI_INLINE void ContinueWhiteClipLuma(const float* JPEGLI_RESTRICT pixels,
+                                         size_t stride,
+                                         const float* JPEGLI_RESTRICT qmc,
+                                         float* JPEGLI_RESTRICT dct,
+                                         float* JPEGLI_RESTRICT scratch_space) {
+  int white_count = 0;
+  HWY_ALIGN float target[64];
+  bool is_white[64];
+  for (int y = 0; y < 8; ++y) {
+    const float* row = pixels + y * stride;
+    for (int x = 0; x < 8; ++x) {
+      float v = row[x];
+      target[y * 8 + x] = v;
+      bool w = (v >= 254.5f);
+      is_white[y * 8 + x] = w;
+      white_count += w ? 1 : 0;
+    }
+  }
+  if (white_count < 2 || white_count == 64) {
+    TransformFromPixels(pixels, stride, dct, scratch_space);
+    return;
+  }
+  static constexpr float kIdctBasis[8][8] = {
+      {1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f},
+      {1.387039f,  1.175876f,  0.785695f,  0.275899f, -0.275899f, -0.785695f, -1.175876f, -1.387039f},
+      {1.306563f,  0.541196f, -0.541196f, -1.306563f, -1.306563f, -0.541196f,  0.541196f,  1.306563f},
+      {1.175876f, -0.275899f, -1.387039f, -0.785695f,  0.785695f,  1.387039f,  0.275899f, -1.175876f},
+      {1.000000f, -1.000000f, -1.000000f,  1.000000f,  1.000000f, -1.000000f, -1.000000f,  1.000000f},
+      {0.785695f, -1.387039f,  0.275899f,  1.175876f, -1.175876f, -0.275899f,  1.387039f, -0.785695f},
+      {0.541196f, -1.306563f,  1.306563f, -0.541196f, -0.541196f,  1.306563f, -1.306563f,  0.541196f},
+      {0.275899f, -0.785695f,  1.175876f, -1.387039f,  1.387039f, -1.175876f,  0.785695f, -0.275899f},
+  };
+  for (int iter = 0; iter < 3; ++iter) {
+    TransformFromPixels(target, 8, dct, scratch_space);
+    float dq[64];
+    dq[0] = 128.0f + std::round((dct[0] - 128.0f) * qmc[0]) / qmc[0];
+    for (int k = 1; k < 64; ++k) {
+      dq[k] = std::round(dct[k] * qmc[k]) / qmc[k];
+    }
+    float tmp_row[64];
+    for (int v = 0; v < 8; ++v) {
+      for (int x = 0; x < 8; ++x) {
+        float sum = 0.0f;
+        for (int u = 0; u < 8; ++u) {
+          sum += dq[v * 8 + u] * kIdctBasis[u][x];
+        }
+        tmp_row[v * 8 + x] = sum;
+      }
+    }
+    for (int y = 0; y < 8; ++y) {
+      for (int x = 0; x < 8; ++x) {
+        if (!is_white[y * 8 + x]) continue;
+        float sum = 0.0f;
+        for (int v = 0; v < 8; ++v) {
+          sum += tmp_row[v * 8 + x] * kIdctBasis[v][y];
+        }
+        if (sum > target[y * 8 + x]) {
+          target[y * 8 + x] = std::min(sum, 380.0f);
+        }
+      }
+    }
+  }
+  TransformFromPixels(target, 8, dct, scratch_space);
+}
+
 template <typename T>
 void ComputeCoefficientBlock(const float* JPEGLI_RESTRICT pixels, size_t stride,
                              const float* JPEGLI_RESTRICT qmc,
@@ -352,7 +428,11 @@ void ComputeCoefficientBlock(const float* JPEGLI_RESTRICT pixels, size_t stride,
                              float* JPEGLI_RESTRICT tmp, T* block) {
   float* JPEGLI_RESTRICT dct = tmp;
   float* JPEGLI_RESTRICT scratch_space = tmp + DCTSIZE2;
-  TransformFromPixels(pixels, stride, dct, scratch_space);
+  if (wasserstein_quant && zero_bias_offset[63] > 0.585f) {
+    ContinueWhiteClipLuma(pixels, stride, qmc, dct, scratch_space);
+  } else {
+    TransformFromPixels(pixels, stride, dct, scratch_space);
+  }
   QuantizeBlock(dct, qmc, aq_strength, zero_bias_offset, zero_bias_mul,
                 energy_based_rdoq, wasserstein_quant, block);
   // Center DC values around zero.

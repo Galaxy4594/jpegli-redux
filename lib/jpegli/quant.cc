@@ -871,6 +871,18 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
           m->zero_bias_offset[1][k] += boost * (cr_offset - m->zero_bias_offset[1][k]);
         }
       }
+      // For 4:2:0 subsampling, each Chroma DCT coefficient covers 4x the spatial
+      // area (16x16 luma pixels). Tighten Chroma dead-zoning asymmetrically
+      // (protecting red-green Cr more strongly than blue-yellow Cb) and lower
+      // the pre-trellis Chroma offset to 0.50 to prevent color blotching.
+      if (m->wasserstein_quant && IsYUV420(cinfo) && cinfo->num_components >= 3) {
+        for (int k = 1; k < DCTSIZE2; ++k) {
+          m->zero_bias_mul[1][k] *= 0.60f;
+          m->zero_bias_mul[2][k] *= 0.35f;
+          m->zero_bias_offset[1][k] = std::min(m->zero_bias_offset[1][k], 0.50f);
+          m->zero_bias_offset[2][k] = std::min(m->zero_bias_offset[2][k], 0.50f);
+        }
+      }
     }
   } else if (cinfo->jpeg_color_space == JCS_YCbCr) {
     for (int c = 0; c < cinfo->num_components; ++c) {
