@@ -390,6 +390,17 @@ void ApplySharpYuvDownsampleImpl(j_compress_ptr cinfo) {
     memcpy(best_cr_ws->Row(y), dcr, down_width * sizeof(float));
   }
 
+  // Distance-aware Chroma update damping: at high quality (distance <= 1.2)
+  // apply full sharp_yuv chroma refinement; at lower quality (distance >= 3.0)
+  // dampen the chroma update step toward 0.50 so we do not inject high-frequency
+  // chroma energy that the quantizer will discard while leaving mismatched Y
+  // compensation halos.
+  float sy_step = 1.0f;
+  if (m->distance > 1.2f) {
+    float t = std::min(1.0f, (m->distance - 1.2f) / 1.8f);
+    sy_step = 1.0f - 0.50f * t;
+  }
+  const auto vstep = Set(d, sy_step);
   const auto vmin = Set(d, 0.0f);
   const auto vmax = Set(d, 255.0f);
   float prev_diff_y_sum = 1e30f;
@@ -473,8 +484,8 @@ void ApplySharpYuvDownsampleImpl(j_compress_ptr cinfo) {
         auto tcr = LoadU(d, row_tgt_cr + x);
         auto dcb = LoadU(d, row_err_cb + x);
         auto dcr = LoadU(d, row_err_cr + x);
-        StoreU(Add(bcb, Sub(tcb, dcb)), d, row_best_cb + x);
-        StoreU(Add(bcr, Sub(tcr, dcr)), d, row_best_cr + x);
+        StoreU(MulAdd(vstep, Sub(tcb, dcb), bcb), d, row_best_cb + x);
+        StoreU(MulAdd(vstep, Sub(tcr, dcr), bcr), d, row_best_cr + x);
       }
     }
     diff_y_sum += ReduceSum(d, acc_y);

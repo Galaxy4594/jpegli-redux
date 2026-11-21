@@ -871,6 +871,13 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
           m->zero_bias_offset[1][k] += boost * (cr_offset - m->zero_bias_offset[1][k]);
         }
       }
+      if (m->use_sharpyuv && IsYUV420(cinfo)) {
+        // Slightly reduce Luma dead-zoning so AQ does not undo the luminance
+        // compensation that sharp_yuv injects around subsampled chroma edges.
+        for (int k = 1; k < DCTSIZE2; ++k) {
+          m->zero_bias_mul[0][k] *= 0.88f;
+        }
+      }
       // For 4:2:0 subsampling, each Chroma DCT coefficient covers 4x the spatial
       // area (16x16 luma pixels). Tighten Chroma dead-zoning asymmetrically
       // (protecting red-green Cr more strongly than blue-yellow Cb) and lower
