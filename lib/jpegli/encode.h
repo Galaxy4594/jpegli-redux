@@ -166,6 +166,13 @@ void jpegli_enable_energy_based_rdoq(j_compress_ptr cinfo, boolean value);
 // Enables Wasserstein optimal transport quantization and energy conservation.
 void jpegli_enable_wasserstein_quant(j_compress_ptr cinfo, boolean value);
 
+// Enables two-pass sparse-bitmask Viterbi trellis RDOQ using real Huffman
+// AC symbol bit lengths.
+void jpegli_enable_trellis_rdoq(j_compress_ptr cinfo, boolean value);
+
+// Sets the rate-distortion lambda for trellis RDOQ (negative = auto default).
+void jpegli_set_trellis_lambda(j_compress_ptr cinfo, float lambda);
+
 // Sets the default progression parameters, where level 0 is sequential, and
 // greater level value means more progression steps. Default is 2.
 void jpegli_set_progressive_level(j_compress_ptr cinfo, int level);

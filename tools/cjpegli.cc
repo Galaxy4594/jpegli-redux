@@ -131,6 +131,21 @@ struct Args {
         &settings.wasserstein_quant, &SetBooleanFalse, 1);
 
     cmdline->AddOptionFlag(
+        '\0', "trellis_rdoq",
+        "Enable sparse-bitmask Viterbi trellis RDOQ using real Huffman AC bit lengths.",
+        &settings.trellis_rdoq, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "notrellis_rdoq",
+        "Disable Viterbi trellis RDOQ.",
+        &settings.trellis_rdoq, &SetBooleanFalse, 1);
+
+    cmdline->AddOptionValue(
+        '\0', "trellis_lambda", "FLOAT",
+        "Rate-distortion lambda for --trellis_rdoq (default: auto 0.05).",
+        &settings.trellis_lambda, &ParseFloat, 1);
+
+    cmdline->AddOptionFlag(
         '\0', "std_quant",
         "Use quantization tables based on Annex K of the JPEG standard.",
         &settings.use_std_quant_tables, &SetBooleanTrue, 1);

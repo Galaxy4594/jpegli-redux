@@ -475,6 +475,12 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
     if (jpeg_settings.wasserstein_quant) {
       jpegli_enable_wasserstein_quant(&cinfo, TRUE);
     }
+    if (jpeg_settings.trellis_rdoq) {
+      jpegli_enable_trellis_rdoq(&cinfo, TRUE);
+    }
+    if (jpeg_settings.trellis_lambda >= 0.0f) {
+      jpegli_set_trellis_lambda(&cinfo, jpeg_settings.trellis_lambda);
+    }
     jpegli_set_adaptive_quantization_scale(&cinfo, jpeg_settings.aq_scale);
     if (jpeg_settings.use_sharpyuv) {
       jpegli_set_sharp_yuv(&cinfo, TRUE);

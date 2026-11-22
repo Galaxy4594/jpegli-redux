@@ -11,10 +11,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 #include "lib/jpegli/common.h"
 #include "lib/jpegli/encode_internal.h"
+#include "lib/jpegli/huffman.h"
 #include "lib/jpegli/memory_manager.h"
 #include "lib/jpegli/quant.h"
 
@@ -233,6 +238,422 @@ void QuantizetoPSNR(j_compress_ptr cinfo) {
   float distance = FindDistanceForPSNR(cinfo);
   UpdateDistance(cinfo, distance);
   ReQuantizeCoeffs(cinfo);
+}
+
+namespace {
+
+inline int Ctz64(uint64_t x) {
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
+  unsigned long idx = 0;
+  _BitScanForward64(&idx, x);
+  return static_cast<int>(idx);
+#elif defined(__GNUC__) || defined(__clang__)
+  return __builtin_ctzll(x);
+#else
+  int n = 0;
+  while ((x & 1ULL) == 0) {
+    x >>= 1;
+    ++n;
+  }
+  return n;
+#endif
+}
+
+inline int SizeOfLevel(int level) {
+  // JPEG magnitude category for |level| > 0, clamped to 1..15.
+  uint32_t v = static_cast<uint32_t>(level);
+#if defined(_MSC_VER)
+  unsigned long idx = 0;
+  _BitScanReverse(&idx, v);
+  int s = static_cast<int>(idx) + 1;
+#elif defined(__GNUC__) || defined(__clang__)
+  int s = 32 - __builtin_clz(v);
+#else
+  int s = 0;
+  while (v > 0) {
+    v >>= 1;
+    ++s;
+  }
+#endif
+  return std::min(s, 15);
+}
+
+struct AcPrices {
+  float symbol[256];
+
+  void BuildFromFrequencies(const uint32_t freq[257]) {
+    uint32_t smoothed[257];
+    for (int s = 0; s < 256; ++s) {
+      smoothed[s] = std::max<uint32_t>(freq[s], 1u);
+    }
+    smoothed[256] = 1u;  // Pseudo-symbol for all-1s code.
+    uint8_t depth[257] = {};
+    CreateHuffmanTree(smoothed, 257, 16, depth);
+    for (int s = 0; s < 256; ++s) {
+      symbol[s] = static_cast<float>(depth[s] > 0 ? depth[s] : 16);
+    }
+  }
+
+  inline float Eob() const { return symbol[0x00]; }
+  inline float Zrl() const { return symbol[0xF0]; }
+
+  inline float Nonzero(int run, int size) const {
+    return static_cast<float>(run >> 4) * Zrl() +
+           symbol[((run & 15) << 4) | size] + static_cast<float>(size);
+  }
+};
+
+// Accumulate JPEG AC symbol frequencies for a plain-rounded block (zigzag).
+void AccumulatePlainAcHistogram(const int16_t* cblock, const float* qmc,
+                                uint32_t freq[257]) {
+  int last = 0;
+  int levels[DCTSIZE2];
+  for (int z = 1; z < DCTSIZE2; ++z) {
+    float x = static_cast<float>(cblock[z]) * qmc[z];
+    int q = static_cast<int>(std::fabs(x) + 0.5f);
+    levels[z] = q;
+    if (q != 0) last = z;
+  }
+  if (last == 0) {
+    ++freq[0x00];
+    return;
+  }
+  int run = 0;
+  for (int z = 1; z <= last; ++z) {
+    int q = levels[z];
+    if (q == 0) {
+      ++run;
+      continue;
+    }
+    while (run >= 16) {
+      ++freq[0xF0];
+      run -= 16;
+    }
+    int size = SizeOfLevel(q);
+    ++freq[(run << 4) | size];
+    run = 0;
+  }
+  if (last < 63) {
+    ++freq[0x00];
+  }
+}
+
+// Sparse-bitmask Viterbi trellis RDOQ for one 8x8 block stored in zigzag order
+// as Q4 unquantized DCT coefficients (cblock[z] * qmc[z] == ideal level).
+void TrellisQuantizeBlock(int16_t* cblock, const float* qmc,
+                          const AcPrices& prices, const float weights[DCTSIZE2],
+                          float lambda, float dc_threshold,
+                          int16_t* last_dc_coeff) {
+  // Quantize DC with deadzone protection relative to previous block's DC.
+  const float dc_ideal = static_cast<float>(cblock[0]) * qmc[0];
+  int16_t dc;
+  if (std::fabs(dc_ideal - static_cast<float>(*last_dc_coeff)) < dc_threshold) {
+    dc = *last_dc_coeff;
+  } else {
+    dc = static_cast<int16_t>(std::lround(dc_ideal));
+  }
+  *last_dc_coeff = dc;
+
+  float ideal[DCTSIZE2];
+  float prefix[DCTSIZE2];
+  prefix[0] = 0.0f;
+  uint64_t nonzero = 0;
+  for (int k = 1; k < DCTSIZE2; ++k) {
+    float v = static_cast<float>(cblock[k]) * qmc[k];
+    ideal[k] = v;
+    prefix[k] = prefix[k - 1] + weights[k] * v * v;
+    if (static_cast<int>(std::fabs(v) + 0.5f) != 0) {
+      nonzero |= (1ULL << k);
+    }
+  }
+
+  if (nonzero == 0) {
+    memset(cblock, 0, DCTSIZE2 * sizeof(int16_t));
+    cblock[0] = dc;
+    return;
+  }
+
+  struct State {
+    uint8_t position;
+    uint8_t from;
+    int16_t level;
+    float prefix;
+    float cost;
+  };
+  State reachable[DCTSIZE2];
+  reachable[0] = {0, 0, 0, 0.0f, 0.0f};
+  int reachable_len = 1;
+
+  uint64_t remaining = nonzero;
+  while (remaining != 0) {
+    int k = Ctz64(remaining);
+    remaining &= remaining - 1;
+    float x = ideal[k];
+    float ax = std::fabs(x);
+    int rounded = static_cast<int>(ax + 0.5f);
+    int size = SizeOfLevel(rounded);
+    float d = ax - static_cast<float>(rounded);
+    float distortion = weights[k] * d * d;
+    float zeros = prefix[k - 1];
+
+    float best = std::numeric_limits<float>::infinity();
+    int best_from = 0;
+    int chosen = rounded;
+
+    // Power-of-2 category boundary (2->1, 4->3, 8->7, ...):
+    // Evaluate both rounded and rounded-1 in a single backwards pass with
+    // monotonic prefix early-break.
+    if (rounded >= 2 && (rounded & (rounded - 1)) == 0) {
+      int lower = rounded - 1;
+      int lower_size = size - 1;
+      float dl = ax - static_cast<float>(lower);
+      float lower_distortion = weights[k] * dl * dl;
+      float lower_best = std::numeric_limits<float>::infinity();
+      int lower_from = 0;
+
+      for (int i = reachable_len - 1; i >= 0; --i) {
+        const State& pred = reachable[i];
+        float tail = zeros - pred.prefix;
+        bool keep_rounded = (tail + distortion) < best;
+        bool keep_lower = (tail + lower_distortion) < std::min(best, lower_best);
+        if (!keep_rounded && !keep_lower) {
+          break;
+        }
+        int run = k - static_cast<int>(pred.position) - 1;
+        if (keep_rounded) {
+          float cost = pred.cost + tail + distortion +
+                       lambda * prices.Nonzero(run, size);
+          if (cost < best) {
+            best = cost;
+            best_from = i;
+          }
+        }
+        if (keep_lower) {
+          float cost = pred.cost + tail + lower_distortion +
+                       lambda * prices.Nonzero(run, lower_size);
+          if (cost < lower_best) {
+            lower_best = cost;
+            lower_from = i;
+          }
+        }
+      }
+      if (lower_best < best) {
+        best = lower_best;
+        best_from = lower_from;
+        chosen = lower;
+      }
+    } else {
+      for (int i = reachable_len - 1; i >= 0; --i) {
+        const State& pred = reachable[i];
+        float tail = zeros - pred.prefix;
+        if (tail + distortion >= best) {
+          break;
+        }
+        int run = k - static_cast<int>(pred.position) - 1;
+        float cost =
+            pred.cost + tail + distortion + lambda * prices.Nonzero(run, size);
+        if (cost < best) {
+          best = cost;
+          best_from = i;
+        }
+      }
+    }
+
+    int signed_level = (x < 0.0f) ? -chosen : chosen;
+    signed_level = std::max(-32767, std::min(32767, signed_level));
+    reachable[reachable_len++] = {
+        static_cast<uint8_t>(k),
+        static_cast<uint8_t>(best_from),
+        static_cast<int16_t>(signed_level),
+        prefix[k],
+        best,
+    };
+  }
+
+  // Close the block: trailing zeros + EOB symbol if last nonzero < 63.
+  int end = 0;
+  float end_cost = std::numeric_limits<float>::infinity();
+  for (int i = 0; i < reachable_len; ++i) {
+    const State& st = reachable[i];
+    if (!std::isfinite(st.cost)) continue;
+    float tail = prefix[63] - st.prefix;
+    float eob = (st.position < 63) ? (lambda * prices.Eob()) : 0.0f;
+    float cost = st.cost + tail + eob;
+    if (cost < end_cost) {
+      end_cost = cost;
+      end = i;
+    }
+  }
+
+  memset(cblock, 0, DCTSIZE2 * sizeof(int16_t));
+  cblock[0] = dc;
+  int idx = end;
+  while (idx > 0) {
+    const State& st = reachable[idx];
+    cblock[st.position] = st.level;
+    idx = st.from;
+  }
+}
+
+}  // namespace
+
+void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
+  jpeg_comp_master* m = cinfo->master;
+  InitQuantizer(cinfo, QuantPass::SEARCH_SECOND_PASS);
+
+  // Pass 1: Build real AC Huffman bit prices per AC Huffman table slot from
+  // plain-rounded coefficients.
+  uint32_t ac_freq[NUM_HUFF_TBLS][257] = {};
+  bool table_used[NUM_HUFF_TBLS] = {};
+  for (int c = 0; c < cinfo->num_components; ++c) {
+    const jpeg_component_info* comp = &cinfo->comp_info[c];
+    const int tbl = std::max(0, std::min(comp->ac_tbl_no, NUM_HUFF_TBLS - 1));
+    table_used[tbl] = true;
+    const float* qmc = m->quant_mul[c];
+    for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
+      JBLOCKARRAY blocks = GetBlockRow(cinfo, c, by);
+      for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
+        AccumulatePlainAcHistogram(&blocks[0][bx][0], qmc, ac_freq[tbl]);
+      }
+    }
+  }
+
+  AcPrices prices[NUM_HUFF_TBLS];
+  for (int t = 0; t < NUM_HUFF_TBLS; ++t) {
+    if (table_used[t]) {
+      prices[t].BuildFromFrequencies(ac_freq[t]);
+    }
+  }
+
+  const bool is_ycbcr = (cinfo->jpeg_color_space == JCS_YCbCr);
+  const bool is_yuv420 =
+      is_ycbcr && cinfo->num_components >= 3 &&
+      cinfo->comp_info[0].h_samp_factor == 2 &&
+      cinfo->comp_info[0].v_samp_factor == 2 &&
+      cinfo->comp_info[1].h_samp_factor == 1 &&
+      cinfo->comp_info[1].v_samp_factor == 1 &&
+      cinfo->comp_info[2].h_samp_factor == 1 &&
+      cinfo->comp_info[2].v_samp_factor == 1;
+
+  // Base rate-distortion lambda (quantizer-unit^2 per bit).
+  const float base_lambda =
+      (m->trellis_lambda >= 0.0f) ? m->trellis_lambda : 0.05f;
+  // Pixel-domain distortion tilt exponent (jhm17 distortion_power = 0.35).
+  static constexpr float kDistortionPower = 0.35f;
+
+  // Precomputed Sobolev H^-1 / 2-Wasserstein radial transport weights
+  // in natural order: 1 / sqrt(1 + 0.10 * (u^2 + v^2)).
+  static constexpr float kTransportW[DCTSIZE2] = {
+      1.0000000f, 0.9534626f, 0.8451543f, 0.7254763f, 0.6201737f, 0.5345225f, 0.4662524f, 0.4116935f,
+      0.9534626f, 0.9128709f, 0.8164966f, 0.7071068f, 0.6085806f, 0.5270463f, 0.4612656f, 0.4082483f,
+      0.8451543f, 0.8164966f, 0.7453560f, 0.6593805f, 0.5773503f, 0.5063697f, 0.4472136f, 0.3984095f,
+      0.7254763f, 0.7071068f, 0.6593805f, 0.5976143f, 0.5345225f, 0.4767313f, 0.4264014f, 0.3834825f,
+      0.6201737f, 0.6085806f, 0.5773503f, 0.5345225f, 0.4879500f, 0.4428074f, 0.4016097f, 0.3651484f,
+      0.5345225f, 0.5270463f, 0.5063697f, 0.4767313f, 0.4428074f, 0.4082483f, 0.3752933f, 0.3450328f,
+      0.4662524f, 0.4612656f, 0.4472136f, 0.4264014f, 0.4016097f, 0.3752933f, 0.3492151f, 0.3244428f,
+      0.4116935f, 0.4082483f, 0.3984095f, 0.3834825f, 0.3651484f, 0.3450328f, 0.3244428f, 0.3042903f,
+  };
+
+  // Smooth Weber-Fechner brightness tilt LUT for Luma: pow(clamp(Y,16,255)/128, 0.40).
+  static const auto kLumaTiltLut = []() {
+    struct Lut {
+      float v[256];
+    } lut{};
+    for (int i = 0; i < 256; ++i) {
+      float ym = static_cast<float>(i < 16 ? 16 : i);
+      lut.v[i] = std::pow(ym / 128.0f, 0.40f);
+    }
+    return lut;
+  }();
+
+  // Pass 2: Run sparse-bitmask Viterbi trellis per block.
+  for (int c = 0; c < cinfo->num_components; ++c) {
+    const jpeg_component_info* comp = &cinfo->comp_info[c];
+    const int tbl = std::max(0, std::min(comp->ac_tbl_no, NUM_HUFF_TBLS - 1));
+    const JQUANT_TBL* qtable = cinfo->quant_tbl_ptrs[comp->quant_tbl_no];
+    const float* qmc = m->quant_mul[c];
+    const size_t h_factor = m->h_factor[c];
+    const size_t v_factor = m->v_factor[c];
+    const bool is_luma = (c == 0);
+    const bool is_subsampled_chroma =
+        (is_ycbcr && c > 0 && (h_factor > 1 || v_factor > 1));
+
+    // Per-channel distortion weight (protect 4:2:0 chroma, especially Cr).
+    float channel_weight = 1.0f;
+    if (is_subsampled_chroma) {
+      channel_weight = 3.0f;
+      if (m->wasserstein_quant && c == 2) {
+        channel_weight = 3.5f;
+      }
+    }
+
+    float mean_step = 0.0f;
+    for (int k = 1; k < DCTSIZE2; ++k) {
+      mean_step += static_cast<float>(qtable->quantval[k]);
+    }
+    mean_step /= 63.0f;
+
+    float weights[DCTSIZE2];
+    weights[0] = channel_weight;
+    for (int z = 1; z < DCTSIZE2; ++z) {
+      int k = kJPEGNaturalOrder[z];
+      float step_ratio =
+          static_cast<float>(qtable->quantval[k]) / std::max(1.0f, mean_step);
+      float w = channel_weight * std::pow(step_ratio, 2.0f * kDistortionPower);
+      if (m->wasserstein_quant && is_luma) {
+        w *= (1.0f + 0.50f * kTransportW[k]);
+      }
+      weights[z] = w;
+    }
+
+    int16_t last_dc = 0;
+    const float dc_zb_offset = m->zero_bias_offset[c][0];
+    const float dc_zb_mul = m->zero_bias_mul[c][0];
+    const bool use_aq = m->use_adaptive_quantization;
+    const bool sharpyuv_luma = (m->use_sharpyuv && is_yuv420 && is_luma);
+
+    for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
+      JBLOCKARRAY blocks = GetBlockRow(cinfo, c, by);
+      const float* qf = use_aq ? m->quant_field.Row(by * v_factor) : nullptr;
+      for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
+        int16_t* cblock = &blocks[0][bx][0];
+        const float aq_strength = use_aq ? qf[bx * h_factor] : 0.0f;
+
+        // Recover approximate mean luma (0..255) from Q4 centered DC.
+        const float dct0 = static_cast<float>(cblock[0]) / 128.0f + 128.0f;
+
+        float lambda_scale = 1.0f;
+        if (use_aq) {
+          // Map jpegli's Butteraugli/Spatial AQ field smoothly into [0.5, 2.5].
+          lambda_scale *= Clamp(0.70f + 0.50f * aq_strength, 0.50f, 2.50f);
+        }
+        if (m->wasserstein_quant && is_luma) {
+          float ym = Clamp(dct0, 16.0f, 255.0f);
+          int idx = static_cast<int>(ym);
+          float frac = ym - static_cast<float>(idx);
+          float tilt = (idx < 255)
+                           ? (kLumaTiltLut.v[idx] +
+                              frac * (kLumaTiltLut.v[idx + 1] -
+                                      kLumaTiltLut.v[idx]))
+                           : kLumaTiltLut.v[255];
+          lambda_scale *= tilt;
+        }
+        if (sharpyuv_luma) {
+          lambda_scale *= 0.88f;
+        }
+
+        float dc_threshold = dc_zb_offset + aq_strength * dc_zb_mul;
+        if (m->wasserstein_quant && is_luma && dct0 < 64.0f) {
+          float darkness = (64.0f - std::max(0.0f, dct0)) / 64.0f;
+          dc_threshold *= (1.0f - 0.25f * darkness);
+        }
+
+        TrellisQuantizeBlock(cblock, qmc, prices[tbl], weights,
+                             base_lambda * lambda_scale, dc_threshold,
+                             &last_dc);
+      }
+    }
+  }
 }
 
 }  // namespace jpegli

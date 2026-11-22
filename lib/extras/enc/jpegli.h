@@ -34,6 +34,8 @@ struct JpegSettings {
   // -1: default based on aq_mode (enabled in mode 2, disabled in mode 0/1). 0: disabled, 1: enabled.
   int energy_based_rdoq = -1;
   bool wasserstein_quant = false;
+  bool trellis_rdoq = false;
+  float trellis_lambda = -1.0f;
   // Adaptive quantization scale factor. If negative (default: -1.0f), auto.
   float aq_scale = -1.0f;
   bool use_std_quant_tables = false;

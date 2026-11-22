@@ -13,6 +13,8 @@ namespace jpegli {
 
 void QuantizetoPSNR(j_compress_ptr cinfo);
 
+void TrellisQuantizeCoeffs(j_compress_ptr cinfo);
+
 }  // namespace jpegli
 
 #endif  // JPEGLI_LIB_JPEGLI_ENCODE_FINISH_H_

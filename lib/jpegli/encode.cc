@@ -402,6 +402,9 @@ bool IsStreamingSupported(j_compress_ptr cinfo) {
   if (cinfo->master->psnr_target > 0) {
     return false;
   }
+  if (cinfo->master->trellis_rdoq) {
+    return false;
+  }
   return true;
 }
 
@@ -482,7 +485,7 @@ void AllocateBuffers(j_compress_ptr cinfo) {
     m->fuzzy_erosion_tmp.Allocate(cinfo, 2, xsize_padded);
     m->pre_erosion.Allocate(cinfo, 6 * cinfo->max_v_samp_factor, xsize_padded);
     size_t qf_height = cinfo->max_v_samp_factor;
-    if (m->psnr_target > 0) {
+    if (m->psnr_target > 0 || m->trellis_rdoq) {
       qf_height *= cinfo->total_iMCU_rows;
     }
     m->quant_field.Allocate(cinfo, qf_height, xsize_blocks);
@@ -539,8 +542,9 @@ void InitCompress(j_compress_ptr cinfo, boolean write_all_tables) {
       ChooseColorTransform(cinfo);
       ChooseDownsampleMethods(cinfo);
     }
-    QuantPass pass = m->psnr_target > 0 ? QuantPass::SEARCH_FIRST_PASS
-                                        : QuantPass::NO_SEARCH;
+    QuantPass pass = (m->psnr_target > 0 || m->trellis_rdoq)
+                         ? QuantPass::SEARCH_FIRST_PASS
+                         : QuantPass::NO_SEARCH;
     InitQuantizer(cinfo, pass);
   }
   if (write_all_tables) {
@@ -722,6 +726,8 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->visual_energy_correction = true;
   cinfo->master->energy_based_rdoq = true;
   cinfo->master->wasserstein_quant = false;
+  cinfo->master->trellis_rdoq = false;
+  cinfo->master->trellis_lambda = -1.0f;
   cinfo->master->color_shift_correction = 1.0f;
   cinfo->master->aq_scale = -1.0f;
   cinfo->master->distance = -1.0f;
@@ -1038,6 +1044,16 @@ void jpegli_enable_energy_based_rdoq(j_compress_ptr cinfo, boolean value) {
 void jpegli_enable_wasserstein_quant(j_compress_ptr cinfo, boolean value) {
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->wasserstein_quant = FROM_JPEGLI_BOOL(value);
+}
+
+void jpegli_enable_trellis_rdoq(j_compress_ptr cinfo, boolean value) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->trellis_rdoq = FROM_JPEGLI_BOOL(value);
+}
+
+void jpegli_set_trellis_lambda(j_compress_ptr cinfo, float lambda) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->trellis_lambda = lambda;
 }
 
 void jpegli_simple_progression(j_compress_ptr cinfo) {
@@ -1367,6 +1383,8 @@ void jpegli_finish_compress(j_compress_ptr cinfo) {
 
   if (m->psnr_target > 0) {
     jpegli::QuantizetoPSNR(cinfo);
+  } else if (m->trellis_rdoq && cinfo->global_state != jpegli::kEncWriteCoeffs) {
+    jpegli::TrellisQuantizeCoeffs(cinfo);
   }
 
   const bool tokens_done = jpegli::IsStreamingSupported(cinfo);

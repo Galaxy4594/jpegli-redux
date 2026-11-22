@@ -119,7 +119,8 @@ void ProcessiMCURow(j_compress_ptr cinfo) {
   int32_t* symbols = m->block_tmp + DCTSIZE2;
   int32_t* nonzero_idx = m->block_tmp + 3 * DCTSIZE2;
   coeff_t* JPEGLI_RESTRICT last_dc_coeff = m->last_dc_coeff;
-  bool adaptive_quant = m->use_adaptive_quantization && m->psnr_target == 0;
+  const bool pass1_raw = (m->psnr_target > 0 || m->trellis_rdoq);
+  bool adaptive_quant = m->use_adaptive_quantization && !pass1_raw;
   JBLOCKARRAY blocks[kMaxComponents];
   if (kMode == kStreamingModeCoefficients) {
     for (int c = 0; c < cinfo->num_components; ++c) {
@@ -193,7 +194,8 @@ void ProcessiMCURow(j_compress_ptr cinfo) {
           const float* pixels = imcu_start[c] + (iy * stride + bx) * DCTSIZE;
           ComputeCoefficientBlock(pixels, stride, qmc, last_dc_coeff[c],
                                   aq_strength, zero_bias_offset, zero_bias_mul,
-                                  m->energy_based_rdoq, m->wasserstein_quant,
+                                  pass1_raw ? false : m->energy_based_rdoq,
+                                  pass1_raw ? false : m->wasserstein_quant,
                                   m->dct_buffer, block);
           if (kMode == kStreamingModeCoefficients) {
             JCOEF* cblock = &blocks[c][iy][bx][0];

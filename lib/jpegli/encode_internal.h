@@ -82,6 +82,8 @@ struct jpeg_comp_master {
   bool visual_energy_correction;
   bool energy_based_rdoq;
   bool wasserstein_quant;
+  bool trellis_rdoq;
+  float trellis_lambda;
   float distance;
   int progressive_level;
   size_t xsize_blocks;
