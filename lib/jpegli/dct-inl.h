@@ -303,33 +303,14 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
   }
 
   // Darker Luma blocks have higher perceptual sensitivity to transport error
-  // and contrast loss (Weber-Fechner effect in low light). Restrict to Luma
-  // (zero_bias_offset[63] > 0.585f) so saturated Cb/Cr < 96 blocks are not
-  // misclassified as dark shadows.
+  // and contrast loss. Restrict to Luma (zero_bias_offset[63] > 0.585f) so
+  // saturated Cb/Cr < 96 blocks are not misclassified as dark shadows.
+  // Brightness modulation is already handled once by GammaModulation in
+  // ComputeAdaptiveQuantField, so only shadow darkness is applied here.
   const bool is_luma = (zero_bias_offset[63] > 0.585f);
   float darkness = 0.0f;
-  if (wasserstein_quant && is_luma) {
-    // Smooth Weber-Fechner brightness tilt on Luma via a fast 256-entry LUT
-    // for pow(clamp(dct[0], 16, 255) / 128.0f, 0.40f) with linear interpolation.
-    static const auto kLumaTiltLut = []() {
-      struct Lut { float v[256]; } lut{};
-      for (int i = 0; i < 256; ++i) {
-        float m = static_cast<float>(i < 16 ? 16 : i);
-        lut.v[i] = std::pow(m / 128.0f, 0.40f);
-      }
-      return lut;
-    }();
-    float luma_mean = std::max(16.0f, std::min(255.0f, dct[0]));
-    int idx = static_cast<int>(luma_mean);
-    float frac = luma_mean - static_cast<float>(idx);
-    float tilt = (idx < 255)
-                     ? (kLumaTiltLut.v[idx] +
-                        frac * (kLumaTiltLut.v[idx + 1] - kLumaTiltLut.v[idx]))
-                     : kLumaTiltLut.v[255];
-    effective_aq *= tilt;
-    if (dct[0] < 64.0f) {
-      darkness = (64.0f - std::max(0.0f, dct[0])) / 64.0f;
-    }
+  if (wasserstein_quant && is_luma && dct[0] < 64.0f) {
+    darkness = (64.0f - std::max(0.0f, dct[0])) / 64.0f;
   }
 
   // Only apply aggressive dead-zoning to trailing coefficients backwards from

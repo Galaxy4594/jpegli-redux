@@ -8,8 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <algorithm>
-#include <cmath>
 #include <string>
 #include <vector>
 
@@ -84,7 +82,7 @@ struct Args {
 
     cmdline->AddOptionValue(
         '\0', "aq_mode", "0|1|2|3",
-        "Adaptive quantization mode: 0=off, 1=old behavior, 2=AQ+visual_energy_correction (default: 2), 3=AQ2+trellis_rdoq+wasserstein_quant+p3.",
+        "Adaptive quantization mode: 0=off, 1=old behavior, 2=fast consolidated AQ+wd-quant (default: 2), 3=AQ2+trellis_rdoq+p3.",
         &settings.adaptive_quantization_mode, &ParseSigned, 1);
 
     cmdline->AddOptionValue(
@@ -298,15 +296,12 @@ int CJpegliMain(int argc, const char* argv[]) {
             ppf.info.ysize, input_bytes.size());
   }
 
-  if (!ValidateArgs(args) || !SetDistance(args, cmdline, &args.settings)) {
-    return EXIT_FAILURE;
-  }
-
   {
     float correction = args.color_shift_correction;
     if (correction < 0.0f) {
-      // Auto-detect genuine yellow / low-blue warm pixels where strong Cb
-      // asymmetry causes hue shifting and yellow desaturation.
+      // Auto-detect genuine yellow / low-blue warm pixels where asymmetric
+      // Cb/Cr quantization causes yellow desaturation, rather than matching
+      // generic red/brown/skin pixels.
       float yellow_pixels = 0.0f;
       float total_pixels = 0.0f;
       for (const auto& img : ppf.frames) {
@@ -318,8 +313,9 @@ int CJpegliMain(int argc, const char* argv[]) {
             float r = img.color.GetPixelValue(y, x, 0);
             float g = img.color.GetPixelValue(y, x, 1);
             float b = img.color.GetPixelValue(y, x, 2);
-            if (r > 0.25f && (std::min(r, g) - b) > 0.15f &&
-                std::fabs(r - g) < 0.30f) {
+            float rg_min = std::min(r, g);
+            if (r > 0.25f && (rg_min - b) > 0.15f &&
+                std::abs(r - g) < 0.30f) {
               yellow_pixels += 1.0f;
             }
             total_pixels += 1.0f;
@@ -327,19 +323,38 @@ int CJpegliMain(int argc, const char* argv[]) {
         }
       }
       if (total_pixels > 0.0f) {
-        float yellow_ratio = yellow_pixels / total_pixels;
-        correction =
-            std::min(1.0f, std::max(0.0f, (yellow_ratio - 0.01f) * 4.0f));
+        float ratio = yellow_pixels / total_pixels;
+        correction = std::max(0.0f, std::min(1.0f, (ratio - 0.01f) * 4.0f));
       } else {
         correction = 0.0f;
+      }
+      // In 4:4:4, Cb has 4x as many blocks as 4:2:0; cap auto correction so
+      // over-funding Cb does not steal bitrate from Luma and Cr.
+      const bool is_explicit_420 =
+          (args.settings.chroma_subsampling == "420" ||
+           args.settings.chroma_subsampling == "422" ||
+           args.settings.chroma_subsampling == "440");
+      const bool is_explicit_444 = (args.settings.chroma_subsampling == "444");
+      const float est_dist =
+          cmdline.GetOption(args.opt_quality_id)->matched()
+              ? jpegli_quality_to_distance(args.quality)
+              : args.settings.distance;
+      const bool will_be_444 =
+          is_explicit_444 || (!is_explicit_420 && est_dist < 1.9f);
+      if (will_be_444) {
+        correction = std::min(correction, 0.45f);
       }
     } else {
       correction = std::min(1.0f, std::max(0.0f, correction));
     }
     args.settings.color_shift_correction = correction;
-    if (!args.quiet && (args.verbose || correction > 0.0f)) {
+    if (!args.quiet && correction > 0.0f) {
       fprintf(stderr, "Color shift correction factor: %.3f\n", correction);
     }
+  }
+
+  if (!ValidateArgs(args) || !SetDistance(args, cmdline, &args.settings)) {
+    return EXIT_FAILURE;
   }
 
   if (!args.settings.use_adaptive_quantization) {
@@ -368,10 +383,12 @@ int CJpegliMain(int argc, const char* argv[]) {
     args.settings.energy_based_rdoq = 1;
   }
 
-  if (args.settings.adaptive_quantization_mode >= 3) {
+  if (args.settings.adaptive_quantization_mode >= 2) {
     if (!cmdline.GetOption(args.opt_nowd_id)->matched()) {
       args.settings.wasserstein_quant = true;
     }
+  }
+  if (args.settings.adaptive_quantization_mode >= 3) {
     if (!cmdline.GetOption(args.opt_notrellis_id)->matched()) {
       args.settings.trellis_rdoq = true;
     }

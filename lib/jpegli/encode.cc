@@ -722,10 +722,11 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->use_std_tables = false;
   cinfo->master->use_adaptive_quantization = true;
   cinfo->master->adaptive_quantization_mode = 2;
+  cinfo->master->chroma_subsampling_set_by_cli = false;
   cinfo->master->use_sharpyuv = false;
   cinfo->master->visual_energy_correction = true;
   cinfo->master->energy_based_rdoq = true;
-  cinfo->master->wasserstein_quant = false;
+  cinfo->master->wasserstein_quant = true;
   cinfo->master->trellis_rdoq = false;
   cinfo->master->trellis_lambda = -1.0f;
   cinfo->master->color_shift_correction = 1.0f;
@@ -1000,8 +1001,8 @@ void jpegli_set_adaptive_quantization_mode(j_compress_ptr cinfo, int mode) {
   cinfo->master->use_adaptive_quantization = (mode > 0);
   cinfo->master->visual_energy_correction = (mode >= 2);
   cinfo->master->energy_based_rdoq = (mode >= 2);
+  cinfo->master->wasserstein_quant = (mode >= 2);
   if (mode >= 3) {
-    cinfo->master->wasserstein_quant = true;
     cinfo->master->trellis_rdoq = true;
     cinfo->master->progressive_level = 3;
   }
@@ -1014,11 +1015,14 @@ void jpegli_enable_adaptive_quantization(j_compress_ptr cinfo, boolean value) {
     cinfo->master->use_adaptive_quantization = false;
     cinfo->master->visual_energy_correction = false;
     cinfo->master->energy_based_rdoq = false;
+    cinfo->master->wasserstein_quant = false;
+    cinfo->master->trellis_rdoq = false;
   } else if (cinfo->master->adaptive_quantization_mode == 0) {
     cinfo->master->adaptive_quantization_mode = 2;
     cinfo->master->use_adaptive_quantization = true;
     cinfo->master->visual_energy_correction = true;
     cinfo->master->energy_based_rdoq = true;
+    cinfo->master->wasserstein_quant = true;
   }
 }
 

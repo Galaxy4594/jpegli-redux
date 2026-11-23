@@ -753,28 +753,22 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
             base_val *= 1.13f;
           }
         } else {
-          // For chroma, protect low-frequency CSF peak (u + v <= 3) and roll
-          // off high-frequency chroma noise (u + v >= 5) that human opponent-
-          // color vision cannot resolve.
+          // For chroma, protect low-frequency CSF peak (u + v <= 3), cap the
+          // extreme bottom-right corner cliff in kBaseQuantMatrixYCbCr (which
+          // otherwise hits 128..254 at Q90 and causes BA max spikes), and in
+          // 4:4:4 keep Chroma/Luma DQT balanced (~2x) for crisp color edges.
           if ((u == 0 && v == 2) || (u == 2 && v == 0)) {
             base_val *= 0.78f;
           } else if (uv >= 2 && uv <= 3 && (u <= 1 || v <= 1)) {
             base_val *= 0.85f;
-          } else if (uv >= 5 && !m->trellis_rdoq) {
+          } else if (uv >= 5 && is_yuv420 && !m->trellis_rdoq) {
             base_val *= 1.0f + 0.10f * static_cast<float>(uv - 4);
           }
-          if (m->trellis_rdoq) {
-            // Cap the extreme bottom-right Chroma corner cliff in
-            // kBaseQuantMatrixYCbCr (which otherwise reaches 128..254 even at
-            // Q90 and causes localized BA max spikes on saturated edges).
-            // In 4:4:4, also bring Chroma/Luma DQT ratio closer to ~2x so sharp
-            // color boundaries survive while the trellis drops noisy HF chroma.
-            if (!is_yuv420) {
-              base_val *= 0.78f;
-            }
-            float luma_cap = 3.8f * base_quant_matrix[0][k];
-            base_val = std::min(base_val, luma_cap);
+          if (!is_yuv420) {
+            base_val *= 0.78f;
           }
+          float luma_cap = 3.8f * base_quant_matrix[0][k];
+          base_val = std::min(base_val, luma_cap);
         }
       }
       int qval = std::round(scale * base_val);
