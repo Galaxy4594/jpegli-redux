@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -296,14 +298,16 @@ int CJpegliMain(int argc, const char* argv[]) {
             ppf.info.ysize, input_bytes.size());
   }
 
+  if (!ValidateArgs(args) || !SetDistance(args, cmdline, &args.settings)) {
+    return EXIT_FAILURE;
+  }
+
   {
     float correction = args.color_shift_correction;
     if (correction < 0.0f) {
-      // Auto-detect warm yellow pixels in the image.
-      // In warm tones, asymmetric Cb/Cr quantization and deadzoning causes 
-      // Cb coefficients to round to 0 earlier than Cr, shifting color hue
-      // and desaturating fine yellow details.
-      float warm_pixels = 0.0f;
+      // Auto-detect genuine yellow / low-blue warm pixels where strong Cb
+      // asymmetry causes hue shifting and yellow desaturation.
+      float yellow_pixels = 0.0f;
       float total_pixels = 0.0f;
       for (const auto& img : ppf.frames) {
         if (img.color.format.num_channels < 3 || args.settings.xyb) continue;
@@ -314,29 +318,37 @@ int CJpegliMain(int argc, const char* argv[]) {
             float r = img.color.GetPixelValue(y, x, 0);
             float g = img.color.GetPixelValue(y, x, 1);
             float b = img.color.GetPixelValue(y, x, 2);
-            if (r > g && g > b && r < 0.8f && r > 0.2f && (r - g) > 0.05f) {
-              warm_pixels += 1.0f;
+            if (r > 0.25f && (std::min(r, g) - b) > 0.15f &&
+                std::fabs(r - g) < 0.30f) {
+              yellow_pixels += 1.0f;
             }
             total_pixels += 1.0f;
           }
         }
       }
       if (total_pixels > 0.0f) {
-        correction = std::min(1.0f, (warm_pixels / total_pixels) * 10.0f);
+        float yellow_ratio = yellow_pixels / total_pixels;
+        correction =
+            std::min(1.0f, std::max(0.0f, (yellow_ratio - 0.01f) * 4.0f));
       } else {
         correction = 0.0f;
       }
+      float effective_distance =
+          cmdline.GetOption(args.opt_quality_id)->matched()
+              ? jpegli_quality_to_distance(args.settings.quality)
+              : args.settings.distance;
+      bool is_444 = (args.settings.chroma_subsampling == "444") ||
+                    (args.settings.chroma_subsampling.empty() &&
+                     effective_distance < 1.9f);
+      float max_csc = is_444 ? 0.45f : 1.0f;
+      correction = std::min(max_csc, correction);
     } else {
       correction = std::min(1.0f, std::max(0.0f, correction));
     }
     args.settings.color_shift_correction = correction;
-    if (!args.quiet && correction > 0.0f) {
+    if (!args.quiet && (args.verbose || correction > 0.0f)) {
       fprintf(stderr, "Color shift correction factor: %.3f\n", correction);
     }
-  }
-
-  if (!ValidateArgs(args) || !SetDistance(args, cmdline, &args.settings)) {
-    return EXIT_FAILURE;
   }
 
   if (!args.settings.use_adaptive_quantization) {
