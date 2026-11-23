@@ -333,15 +333,6 @@ int CJpegliMain(int argc, const char* argv[]) {
       } else {
         correction = 0.0f;
       }
-      float effective_distance =
-          cmdline.GetOption(args.opt_quality_id)->matched()
-              ? jpegli_quality_to_distance(args.settings.quality)
-              : args.settings.distance;
-      bool is_444 = (args.settings.chroma_subsampling == "444") ||
-                    (args.settings.chroma_subsampling.empty() &&
-                     effective_distance < 1.9f);
-      float max_csc = is_444 ? 0.45f : 1.0f;
-      correction = std::min(max_csc, correction);
     } else {
       correction = std::min(1.0f, std::max(0.0f, correction));
     }
