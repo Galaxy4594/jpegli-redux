@@ -537,13 +537,16 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       cinfo->comp_info[2].h_samp_factor == 1 &&
       cinfo->comp_info[2].v_samp_factor == 1;
 
-  // Distance-adaptive base rate-distortion lambda (quantizer-unit^2 per bit):
-  // At high quality (distance <= 1.2), 0.045 saves substantial bitrate cleanly;
-  // at low quality (large distance / large DQT steps), decay lambda smoothly so
-  // the trellis does not wipe out +/-1 AC coefficients into flat DC-only blocks.
+  // Distance- and subsampling-adaptive base rate-distortion lambda
+  // (quantizer-unit^2 per bit):
+  // - 4:4:4 starts at 0.030 (preserving crisp photographic detail and BA max)
+  //   and decays smoothly toward ~0.012 at Q30.
+  // - 4:2:0 starts at 0.015 (gentler on Luma since Chroma is already protected)
+  //   and decays smoothly toward ~0.006 at Q30.
   const float distance = (m->distance >= 0.0f) ? m->distance : 1.0f;
+  const float lambda_hq = is_yuv420 ? 0.015f : 0.030f;
   const float auto_lambda =
-      0.045f / (1.0f + 0.55f * std::max(0.0f, distance - 1.2f));
+      lambda_hq / (1.0f + 0.30f * std::max(0.0f, distance - 1.2f));
   const float base_lambda =
       (m->trellis_lambda >= 0.0f) ? m->trellis_lambda : auto_lambda;
   // Tighten the upper AQ lambda_scale ceiling (1.50 -> 1.25 at high distance)
