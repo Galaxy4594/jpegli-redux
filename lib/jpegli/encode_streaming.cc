@@ -210,7 +210,9 @@ void ProcessiMCURow(j_compress_ptr cinfo) {
           if (kMode == kStreamingModeCoefficients) {
             JCOEF* cblock = &blocks[c][iy][bx][0];
             for (int k = 0; k < DCTSIZE2; ++k) {
-              cblock[k] = block[kJPEGNaturalOrder[k]];
+              int32_t v = block[kJPEGNaturalOrder[k]];
+              cblock[k] = static_cast<JCOEF>(
+                  std::max<int32_t>(-32767, std::min<int32_t>(32767, v)));
             }
           }
           block[0] -= last_dc_coeff[c];

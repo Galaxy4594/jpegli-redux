@@ -411,6 +411,8 @@ bool IsStreamingSupported(j_compress_ptr cinfo) {
 void AllocateBuffers(j_compress_ptr cinfo) {
   jpeg_comp_master* m = cinfo->master;
   memset(m->last_dc_coeff, 0, sizeof(m->last_dc_coeff));
+  memset(m->input_rgb, 0, sizeof(m->input_rgb));
+  memset(m->sharpyuv_workspace, 0, sizeof(m->sharpyuv_workspace));
   if (!IsStreamingSupported(cinfo) || cinfo->optimize_coding) {
     int ysize_blocks = DivCeil(cinfo->image_height, DCTSIZE);
     int num_arrays = cinfo->num_scans * ysize_blocks;
@@ -492,10 +494,13 @@ void AllocateBuffers(j_compress_ptr cinfo) {
     m->prev_quant_row =
         Allocate<float>(cinfo, xsize_blocks, JPOOL_IMAGE_ALIGNED);
     memset(m->prev_quant_row, 0, xsize_blocks * sizeof(float));
+    m->smoothed_quant_buf = Allocate<float>(
+        cinfo, cinfo->max_v_samp_factor * xsize_blocks, JPOOL_IMAGE_ALIGNED);
   } else {
     m->quant_field.Allocate(cinfo, 1, m->xsize_blocks);
     m->quant_field.FillRow(0, 0, m->xsize_blocks);
     m->prev_quant_row = nullptr;
+    m->smoothed_quant_buf = nullptr;
   }
   for (int c = 0; c < cinfo->num_components; ++c) {
     m->zero_bias_offset[c] =
@@ -609,10 +614,18 @@ void PadInputBuffer(j_compress_ptr cinfo, float* row[kMaxComponents]) {
   }
   if (m->next_input_row == cinfo->image_height) {
     size_t num_rows = m->ysize_blocks * DCTSIZE - cinfo->image_height;
+    const bool pad_rgb = m->input_rgb[0].HasData();
+    const size_t last_rgb_row = m->next_input_row - 1;
     for (size_t i = 0; i < num_rows; ++i) {
       for (int c = 0; c < cinfo->num_components; ++c) {
         float* dest = m->input_buffer[c].Row(m->next_input_row) - 1;
         memcpy(dest, row[c] - 1, (len1 + 2) * sizeof(dest[0]));
+      }
+      if (pad_rgb) {
+        for (int c = 0; c < 3; ++c) {
+          memcpy(m->input_rgb[c].Row(m->next_input_row),
+                 m->input_rgb[c].Row(last_rgb_row), len1 * sizeof(float));
+        }
       }
       ++m->next_input_row;
     }
@@ -714,7 +727,7 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   memset(cinfo->arith_ac_K, 0, sizeof(cinfo->arith_ac_K));
   cinfo->write_Adobe_marker = FALSE;
   cinfo->master = jpegli::Allocate<jpeg_comp_master>(cinfo, 1);
-  memset(cinfo->master->input_rgb, 0, sizeof(cinfo->master->input_rgb));
+  memset(cinfo->master, 0, sizeof(*cinfo->master));
   jpegli::InitializeCompressParams(cinfo);
   cinfo->master->force_baseline = true;
   cinfo->master->xyb_mode = false;

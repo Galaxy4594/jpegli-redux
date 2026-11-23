@@ -1244,6 +1244,17 @@ void OptimizeProgressiveScanScript(j_compress_ptr cinfo) {
   cinfo->scan_info = cinfo->script_space;
   cinfo->num_scans = cinfo->script_space_size;
 
+  // Reallocate token_arrays for the chosen scan count so small images cannot
+  // overflow the initial allocation made for the default scan script.
+  const int ysize_blocks = DivCeil(cinfo->image_height, DCTSIZE);
+  const int num_token_arrays = cinfo->num_scans * ysize_blocks;
+  m->token_arrays =
+      Allocate<TokenArray>(cinfo, num_token_arrays, JPOOL_IMAGE);
+  memset(m->token_arrays, 0, num_token_arrays * sizeof(TokenArray));
+  m->cur_token_array = 0;
+  m->num_tokens = 0;
+  m->total_num_tokens = 0;
+
   // Rebuild scan_token_info, ac_ctx_offset, and num_contexts for the chosen script.
   m->scan_token_info =
       Allocate<ScanTokenInfo>(cinfo, cinfo->num_scans, JPOOL_IMAGE);
