@@ -169,6 +169,16 @@ void ProcessiMCURow(j_compress_ptr cinfo) {
         ac_code = &m->coding_tables[m->context_map[c + 4]];
       }
       float* JPEGLI_RESTRICT qmc = m->quant_mul[c];
+      HWY_ALIGN float clip_qmc_buf[DCTSIZE2];
+      const float* clip_qmc = nullptr;
+      if (pass1_raw && m->trellis_rdoq && m->wasserstein_quant && c == 0 &&
+          cinfo->quant_tbl_ptrs[comp->quant_tbl_no] != nullptr) {
+        const JQUANT_TBL* qt = cinfo->quant_tbl_ptrs[comp->quant_tbl_no];
+        for (int k = 0; k < DCTSIZE2; ++k) {
+          clip_qmc_buf[k] = 8.0f / static_cast<float>(qt->quantval[k]);
+        }
+        clip_qmc = clip_qmc_buf;
+      }
       const size_t stride = m->raw_data[c]->stride();
       const int h_factor = m->h_factor[c];
       const float* zero_bias_offset = m->zero_bias_offset[c];
@@ -196,7 +206,7 @@ void ProcessiMCURow(j_compress_ptr cinfo) {
                                   aq_strength, zero_bias_offset, zero_bias_mul,
                                   pass1_raw ? false : m->energy_based_rdoq,
                                   pass1_raw ? false : m->wasserstein_quant,
-                                  m->dct_buffer, block);
+                                  m->dct_buffer, block, clip_qmc);
           if (kMode == kStreamingModeCoefficients) {
             JCOEF* cblock = &blocks[c][iy][bx][0];
             for (int k = 0; k < DCTSIZE2; ++k) {

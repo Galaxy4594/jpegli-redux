@@ -464,11 +464,14 @@ void ComputeCoefficientBlock(const float* JPEGLI_RESTRICT pixels, size_t stride,
                              const float* zero_bias_mul,
                              bool energy_based_rdoq,
                              bool wasserstein_quant,
-                             float* JPEGLI_RESTRICT tmp, T* block) {
+                             float* JPEGLI_RESTRICT tmp, T* block,
+                             const float* clip_qmc = nullptr) {
   float* JPEGLI_RESTRICT dct = tmp;
   float* JPEGLI_RESTRICT scratch_space = tmp + DCTSIZE2;
-  if (wasserstein_quant && zero_bias_offset[63] > 0.585f) {
-    ContinueWhiteClipLuma(pixels, stride, qmc, dct, scratch_space);
+  if ((wasserstein_quant || clip_qmc != nullptr) &&
+      zero_bias_offset[63] > 0.585f) {
+    ContinueWhiteClipLuma(pixels, stride, clip_qmc ? clip_qmc : qmc, dct,
+                          scratch_space);
   } else {
     TransformFromPixels(pixels, stride, dct, scratch_space);
   }

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <vector>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
@@ -502,26 +503,27 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
   InitQuantizer(cinfo, QuantPass::SEARCH_SECOND_PASS);
 
   // Pass 1: Build real AC Huffman bit prices per AC Huffman table slot from
-  // plain-rounded coefficients.
-  uint32_t ac_freq[NUM_HUFF_TBLS][257] = {};
+  // plain-rounded coefficients (heap-allocated to keep stack frame small).
+  std::vector<uint32_t> ac_freq_buf(NUM_HUFF_TBLS * 257, 0);
   bool table_used[NUM_HUFF_TBLS] = {};
   for (int c = 0; c < cinfo->num_components; ++c) {
     const jpeg_component_info* comp = &cinfo->comp_info[c];
     const int tbl = std::max(0, std::min(comp->ac_tbl_no, NUM_HUFF_TBLS - 1));
     table_used[tbl] = true;
     const float* qmc = m->quant_mul[c];
+    uint32_t* freq = &ac_freq_buf[tbl * 257];
     for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
       JBLOCKARRAY blocks = GetBlockRow(cinfo, c, by);
       for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
-        AccumulatePlainAcHistogram(&blocks[0][bx][0], qmc, ac_freq[tbl]);
+        AccumulatePlainAcHistogram(&blocks[0][bx][0], qmc, freq);
       }
     }
   }
 
-  AcPrices prices[NUM_HUFF_TBLS];
+  std::vector<AcPrices> prices(NUM_HUFF_TBLS);
   for (int t = 0; t < NUM_HUFF_TBLS; ++t) {
     if (table_used[t]) {
-      prices[t].BuildFromFrequencies(ac_freq[t]);
+      prices[t].BuildFromFrequencies(&ac_freq_buf[t * 257]);
     }
   }
 
@@ -535,11 +537,22 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       cinfo->comp_info[2].h_samp_factor == 1 &&
       cinfo->comp_info[2].v_samp_factor == 1;
 
-  // Base rate-distortion lambda (quantizer-unit^2 per bit).
+  // Distance-adaptive base rate-distortion lambda (quantizer-unit^2 per bit):
+  // At high quality (distance <= 1.2), 0.045 saves substantial bitrate cleanly;
+  // at low quality (large distance / large DQT steps), decay lambda smoothly so
+  // the trellis does not wipe out +/-1 AC coefficients into flat DC-only blocks.
+  const float distance = (m->distance >= 0.0f) ? m->distance : 1.0f;
+  const float auto_lambda =
+      0.045f / (1.0f + 0.55f * std::max(0.0f, distance - 1.2f));
   const float base_lambda =
-      (m->trellis_lambda >= 0.0f) ? m->trellis_lambda : 0.05f;
-  // Pixel-domain distortion tilt exponent (jhm17 distortion_power = 0.35).
-  static constexpr float kDistortionPower = 0.35f;
+      (m->trellis_lambda >= 0.0f) ? m->trellis_lambda : auto_lambda;
+  // Also tighten the upper AQ lambda_scale ceiling at high distance so coarse
+  // low-Q blocks are not over-dropped.
+  const float aq_hi_cap =
+      Clamp(2.0f - 0.14f * std::max(0.0f, distance - 1.5f), 1.30f, 2.0f);
+  // Gentle pixel-domain distortion tilt tuned for jpegli's steeper kExponent
+  // DQT curve (clamped step_ratio prevents starving LF at low quality).
+  static constexpr float kDistortionPower = 0.15f;
 
   // Precomputed Sobolev H^-1 / 2-Wasserstein radial transport weights
   // in natural order: 1 / sqrt(1 + 0.10 * (u^2 + v^2)).
@@ -597,11 +610,14 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
     weights[0] = channel_weight;
     for (int z = 1; z < DCTSIZE2; ++z) {
       int k = kJPEGNaturalOrder[z];
-      float step_ratio =
-          static_cast<float>(qtable->quantval[k]) / std::max(1.0f, mean_step);
+      float step_ratio = Clamp(
+          static_cast<float>(qtable->quantval[k]) / std::max(1.0f, mean_step),
+          0.60f, 1.65f);
       float w = channel_weight * std::pow(step_ratio, 2.0f * kDistortionPower);
       if (m->wasserstein_quant && is_luma) {
-        w *= (1.0f + 0.50f * kTransportW[k]);
+        // Gentle Sobolev H^-1 weighting centered near 1.0 so LF gradients are
+        // protected without starving HF fine detail.
+        w *= (0.90f + 0.25f * kTransportW[k]);
       }
       weights[z] = w;
     }
@@ -611,6 +627,62 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
     const float dc_zb_mul = m->zero_bias_mul[c][0];
     const bool use_aq = m->use_adaptive_quantization;
     const bool sharpyuv_luma = (m->use_sharpyuv && is_yuv420 && is_luma);
+
+    // Pre-pass: 3-class DCT structure / maskability classifier with
+    // content-only median normalization (ignoring flat blocks < 1.0 variance).
+    const size_t num_blocks =
+        static_cast<size_t>(comp->height_in_blocks) * comp->width_in_blocks;
+    std::vector<float> block_ac_energy;
+    std::vector<float> block_raw_mask;
+    float median_mask = 1.0f;
+    if (use_aq && num_blocks > 0) {
+      block_ac_energy.resize(num_blocks);
+      block_raw_mask.resize(num_blocks);
+      std::vector<float> content_masks;
+      content_masks.reserve(num_blocks);
+      static constexpr float kInvQ4Scale = 1.0f / 128.0f;
+      static constexpr float kMinContentVariance = 1.0f;
+
+      for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
+        JBLOCKARRAY blocks = GetBlockRow(cinfo, c, by);
+        const float* qf = m->quant_field.Row(by * v_factor);
+        for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
+          const int16_t* cblock = &blocks[0][bx][0];
+          float ac_energy = 0.0f;
+          float peak_energy = 0.0f;
+          float diag_energy = 0.0f;
+          for (int z = 1; z < DCTSIZE2; ++z) {
+            float v = static_cast<float>(cblock[z]) * kInvQ4Scale;
+            float e = v * v;
+            ac_energy += e;
+            if (e > peak_energy) peak_energy = e;
+            int k = kJPEGNaturalOrder[z];
+            if ((k >> 3) >= 2 && (k & 7) >= 2) {
+              diag_energy += e;
+            }
+          }
+          float spread =
+              1.0f - Clamp((peak_energy / (ac_energy + 1e-6f)) * 3.0f, 0.0f, 1.0f);
+          float isotropy =
+              Clamp((diag_energy / (ac_energy + 1e-6f)) * 2.5f, 0.0f, 1.0f);
+          float maskability = spread * (0.4f + 0.6f * isotropy);
+          float raw_mask = qf[bx * h_factor] * maskability;
+
+          size_t bidx = static_cast<size_t>(by) * comp->width_in_blocks + bx;
+          block_ac_energy[bidx] = ac_energy;
+          block_raw_mask[bidx] = raw_mask;
+          if (ac_energy >= kMinContentVariance) {
+            content_masks.push_back(raw_mask);
+          }
+        }
+      }
+      if (!content_masks.empty()) {
+        size_t mid = content_masks.size() / 2;
+        std::nth_element(content_masks.begin(), content_masks.begin() + mid,
+                         content_masks.end());
+        median_mask = std::max(content_masks[mid], 0.10f);
+      }
+    }
 
     for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
       JBLOCKARRAY blocks = GetBlockRow(cinfo, c, by);
@@ -623,9 +695,17 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
         const float dct0 = static_cast<float>(cblock[0]) / 128.0f + 128.0f;
 
         float lambda_scale = 1.0f;
-        if (use_aq) {
-          // Map jpegli's Butteraugli/Spatial AQ field smoothly into [0.5, 2.5].
-          lambda_scale *= Clamp(0.70f + 0.50f * aq_strength, 0.50f, 2.50f);
+        if (use_aq && !block_ac_energy.empty()) {
+          size_t bidx = static_cast<size_t>(by) * comp->width_in_blocks + bx;
+          if (block_ac_energy[bidx] < 1.0f) {
+            // Smooth / flat gradient block: protect strongly against banding.
+            lambda_scale *= 0.65f;
+          } else {
+            // Content block normalized against content-only median:
+            // coherent fine detail stays ~0.72..0.95, noisy texture goes up to 2.0.
+            float norm_mask = block_raw_mask[bidx] / median_mask;
+            lambda_scale *= Clamp(0.65f + 0.35f * norm_mask, 0.55f, aq_hi_cap);
+          }
         }
         if (m->wasserstein_quant && is_luma) {
           float ym = Clamp(dct0, 16.0f, 255.0f);

@@ -747,7 +747,7 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
             }
             base_val *= high_scale;
           }
-          if (uv >= 2 && m->use_adaptive_quantization &&
+          if (uv >= 2 && m->use_adaptive_quantization && !m->trellis_rdoq &&
               m->cicp_transfer_function != kTransferFunctionPQ &&
               m->cicp_transfer_function != kTransferFunctionHLG) {
             base_val *= 1.13f;
@@ -760,8 +760,20 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
             base_val *= 0.78f;
           } else if (uv >= 2 && uv <= 3 && (u <= 1 || v <= 1)) {
             base_val *= 0.85f;
-          } else if (uv >= 5) {
+          } else if (uv >= 5 && !m->trellis_rdoq) {
             base_val *= 1.0f + 0.10f * static_cast<float>(uv - 4);
+          }
+          if (m->trellis_rdoq) {
+            // Cap the extreme bottom-right Chroma corner cliff in
+            // kBaseQuantMatrixYCbCr (which otherwise reaches 128..254 even at
+            // Q90 and causes localized BA max spikes on saturated edges).
+            // In 4:4:4, also bring Chroma/Luma DQT ratio closer to ~2x so sharp
+            // color boundaries survive while the trellis drops noisy HF chroma.
+            if (!is_yuv420) {
+              base_val *= 0.78f;
+            }
+            float luma_cap = 3.8f * base_quant_matrix[0][k];
+            base_val = std::min(base_val, luma_cap);
           }
         }
       }

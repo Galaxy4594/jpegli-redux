@@ -67,7 +67,7 @@ struct Args {
                             "Chroma subsampling setting.",
                             &settings.chroma_subsampling, &ParseString);
 
-    cmdline->AddOptionValue(
+    opt_progressive_id = cmdline->AddOptionValue(
         'p', "progressive_level", "N",
         "Progressive level setting. Range: 0 .. 3.\n"
         "    Default: 2. 0=sequential, 3=per-component optimal scan search.",
@@ -81,8 +81,8 @@ struct Args {
                            &settings.use_sharpyuv, &SetBooleanTrue, 1);
 
     cmdline->AddOptionValue(
-        '\0', "aq_mode", "0|1|2",
-        "Adaptive quantization mode: 0=off, 1=old behavior, 2=AQ+visual_energy_correction (default: 2).",
+        '\0', "aq_mode", "0|1|2|3",
+        "Adaptive quantization mode: 0=off, 1=old behavior, 2=AQ+visual_energy_correction (default: 2), 3=AQ2+trellis_rdoq+wasserstein_quant+p3.",
         &settings.adaptive_quantization_mode, &ParseSigned, 1);
 
     cmdline->AddOptionValue(
@@ -125,7 +125,7 @@ struct Args {
         "Enable Wasserstein optimal transport quantization and energy conservation.",
         &settings.wasserstein_quant, &SetBooleanTrue, 1);
 
-    cmdline->AddOptionFlag(
+    opt_nowd_id = cmdline->AddOptionFlag(
         '\0', "nowasserstein_quant",
         "Disable Wasserstein optimal transport quantization.",
         &settings.wasserstein_quant, &SetBooleanFalse, 1);
@@ -135,7 +135,7 @@ struct Args {
         "Enable sparse-bitmask Viterbi trellis RDOQ using real Huffman AC bit lengths.",
         &settings.trellis_rdoq, &SetBooleanTrue, 1);
 
-    cmdline->AddOptionFlag(
+    opt_notrellis_id = cmdline->AddOptionFlag(
         '\0', "notrellis_rdoq",
         "Disable Viterbi trellis RDOQ.",
         &settings.trellis_rdoq, &SetBooleanFalse, 1);
@@ -202,6 +202,9 @@ struct Args {
   // References (ids) of specific options to check if they were matched.
   CommandLineParser::OptionId opt_distance_id = -1;
   CommandLineParser::OptionId opt_quality_id = -1;
+  CommandLineParser::OptionId opt_progressive_id = -1;
+  CommandLineParser::OptionId opt_nowd_id = -1;
+  CommandLineParser::OptionId opt_notrellis_id = -1;
 };
 
 bool ValidateArgs(const Args& args) {
@@ -362,6 +365,18 @@ int CJpegliMain(int argc, const char* argv[]) {
     args.settings.energy_based_rdoq = 1;
   }
 
+  if (args.settings.adaptive_quantization_mode >= 3) {
+    if (!cmdline.GetOption(args.opt_nowd_id)->matched()) {
+      args.settings.wasserstein_quant = true;
+    }
+    if (!cmdline.GetOption(args.opt_notrellis_id)->matched()) {
+      args.settings.trellis_rdoq = true;
+    }
+    if (!cmdline.GetOption(args.opt_progressive_id)->matched()) {
+      args.settings.progressive_level = 3;
+    }
+  }
+
   if (!args.quiet) {
     const jpegli::extras::JpegSettings& s = args.settings;
     float calculated_distance =
@@ -370,7 +385,9 @@ int CJpegliMain(int argc, const char* argv[]) {
             : s.distance;
     const char* aq_str = "noAQ";
     if (s.use_adaptive_quantization && s.adaptive_quantization_mode > 0) {
-      aq_str = s.adaptive_quantization_mode == 2 ? "AQ2" : "AQ1";
+      aq_str = s.adaptive_quantization_mode >= 3
+                   ? "AQ3"
+                   : (s.adaptive_quantization_mode == 2 ? "AQ2" : "AQ1");
     }
     fprintf(stderr, "Encoding [%s%s d%.3f%s %s p%d %s]\n",
             s.xyb ? "XYB" : "YUV", s.chroma_subsampling.c_str(),

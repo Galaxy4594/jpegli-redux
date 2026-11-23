@@ -141,7 +141,9 @@ void jpegli_set_input_format(j_compress_ptr cinfo, JpegliDataType data_type,
                              JpegliEndianness endianness);
 
 // Sets adaptive quantization mode:
-// 0 = off, 1 = old behavior, 2 = AQ + visual_energy_correction + energy_based_rdoq (default: 2)
+// 0 = off, 1 = old behavior,
+// 2 = AQ + visual_energy_correction + energy_based_rdoq (default: 2),
+// 3 = mode 2 + full trellis RDOQ + wasserstein_quant + progressive_level 3
 void jpegli_set_adaptive_quantization_mode(j_compress_ptr cinfo, int mode);
 
 // Sets whether or not the encoder uses adaptive quantization for creating more

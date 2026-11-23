@@ -472,12 +472,10 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
       jpegli_enable_energy_based_rdoq(
           &cinfo, jpeg_settings.energy_based_rdoq ? TRUE : FALSE);
     }
-    if (jpeg_settings.wasserstein_quant) {
-      jpegli_enable_wasserstein_quant(&cinfo, TRUE);
-    }
-    if (jpeg_settings.trellis_rdoq) {
-      jpegli_enable_trellis_rdoq(&cinfo, TRUE);
-    }
+    jpegli_enable_wasserstein_quant(
+        &cinfo, jpeg_settings.wasserstein_quant ? TRUE : FALSE);
+    jpegli_enable_trellis_rdoq(&cinfo,
+                               jpeg_settings.trellis_rdoq ? TRUE : FALSE);
     if (jpeg_settings.trellis_lambda >= 0.0f) {
       jpegli_set_trellis_lambda(&cinfo, jpeg_settings.trellis_lambda);
     }

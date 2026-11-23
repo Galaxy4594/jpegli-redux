@@ -584,9 +584,9 @@ void ComputeAdaptiveQuantField(j_compress_ptr cinfo) {
     }
   }
 
-  // Spatial AQ regularization (mode 2): 2D smooth out abrupt block-to-block AQ cliffs
+  // Spatial AQ regularization (mode >= 2): 2D smooth out abrupt block-to-block AQ cliffs
   // to avoid adjacent flat vs textured checkerboard artifacts.
-  if (m->adaptive_quantization_mode == 2 && xsize_blocks >= 2) {
+  if (m->adaptive_quantization_mode >= 2 && xsize_blocks >= 2) {
     const int num_y = cinfo->max_v_samp_factor;
     std::vector<std::vector<float>> smoothed(num_y,
                                              std::vector<float>(xsize_blocks));
