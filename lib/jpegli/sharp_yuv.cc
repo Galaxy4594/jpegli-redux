@@ -156,8 +156,6 @@ HWY_INLINE void YCbCrToRGB_SIMD(D df, V y, V cb, V cr, V* r, V* g, V* b) {
 
 template <class D, class V>
 HWY_INLINE V TempLuma_SIMD(D df, V r, V g, V b) {
-  // using bt 709 values (0.2126f, 0.7152f, 0.0722f) may be more perceptually
-  // accurate, but it needs more visual testing.
   const auto kR = Set(df, 0.299f);
   const auto kG = Set(df, 0.587f);
   const auto kB = Set(df, 0.114f);
@@ -484,8 +482,10 @@ void ApplySharpYuvDownsampleImpl(j_compress_ptr cinfo) {
         auto tcr = LoadU(d, row_tgt_cr + x);
         auto dcb = LoadU(d, row_err_cb + x);
         auto dcr = LoadU(d, row_err_cr + x);
-        StoreU(MulAdd(vstep, Sub(tcb, dcb), bcb), d, row_best_cb + x);
-        StoreU(MulAdd(vstep, Sub(tcr, dcr), bcr), d, row_best_cr + x);
+        auto ncb = Min(Max(MulAdd(vstep, Sub(tcb, dcb), bcb), vmin), vmax);
+        auto ncr = Min(Max(MulAdd(vstep, Sub(tcr, dcr), bcr), vmin), vmax);
+        StoreU(ncb, d, row_best_cb + x);
+        StoreU(ncr, d, row_best_cr + x);
       }
     }
     diff_y_sum += ReduceSum(d, acc_y);
