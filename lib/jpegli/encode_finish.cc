@@ -546,10 +546,10 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       0.045f / (1.0f + 0.55f * std::max(0.0f, distance - 1.2f));
   const float base_lambda =
       (m->trellis_lambda >= 0.0f) ? m->trellis_lambda : auto_lambda;
-  // Also tighten the upper AQ lambda_scale ceiling at high distance so coarse
-  // low-Q blocks are not over-dropped.
+  // Tighten the upper AQ lambda_scale ceiling (1.50 -> 1.25 at high distance)
+  // to prevent lone over-quantized flat blocks inside detailed regions.
   const float aq_hi_cap =
-      Clamp(2.0f - 0.14f * std::max(0.0f, distance - 1.5f), 1.30f, 2.0f);
+      Clamp(1.50f - 0.10f * std::max(0.0f, distance - 1.5f), 1.25f, 1.50f);
   // Gentle pixel-domain distortion tilt tuned for jpegli's steeper kExponent
   // DQT curve (clamped step_ratio prevents starving LF at low quality).
   static constexpr float kDistortionPower = 0.15f;
@@ -661,9 +661,33 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
           size_t bidx = static_cast<size_t>(by) * comp->width_in_blocks + bx;
           block_ac_energy[bidx] = ac_energy;
           block_raw_mask[bidx] = raw_mask;
-          if (ac_energy >= kMinContentVariance) {
-            content_masks.push_back(raw_mask);
+        }
+      }
+      if (comp->width_in_blocks >= 2 && comp->height_in_blocks >= 2) {
+        // 2D 5-point cross smoothing of block_raw_mask to eliminate lone
+        // over-quantized flat blocks inside detailed regions.
+        std::vector<float> smoothed(num_blocks);
+        const size_t w_blk = comp->width_in_blocks;
+        const size_t h_blk = comp->height_in_blocks;
+        for (size_t by = 0; by < h_blk; ++by) {
+          size_t y_up = (by > 0) ? (by - 1) : 0;
+          size_t y_dn = (by + 1 < h_blk) ? (by + 1) : (h_blk - 1);
+          for (size_t bx = 0; bx < w_blk; ++bx) {
+            size_t x_l = (bx > 0) ? (bx - 1) : 0;
+            size_t x_r = (bx + 1 < w_blk) ? (bx + 1) : (w_blk - 1);
+            float center = block_raw_mask[by * w_blk + bx];
+            float l = block_raw_mask[by * w_blk + x_l];
+            float r = block_raw_mask[by * w_blk + x_r];
+            float t = block_raw_mask[y_up * w_blk + bx];
+            float b = block_raw_mask[y_dn * w_blk + bx];
+            smoothed[by * w_blk + bx] = 0.50f * center + 0.125f * (l + r + t + b);
           }
+        }
+        block_raw_mask.swap(smoothed);
+      }
+      for (size_t bidx = 0; bidx < num_blocks; ++bidx) {
+        if (block_ac_energy[bidx] >= kMinContentVariance) {
+          content_masks.push_back(block_raw_mask[bidx]);
         }
       }
       if (!content_masks.empty()) {
@@ -689,12 +713,12 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
           size_t bidx = static_cast<size_t>(by) * comp->width_in_blocks + bx;
           if (block_ac_energy[bidx] < 1.0f) {
             // Smooth / flat gradient block: protect strongly against banding.
-            lambda_scale *= 0.65f;
+            lambda_scale *= 0.45f;
           } else {
             // Content block normalized against content-only median:
-            // coherent fine detail stays ~0.72..0.95, noisy texture goes up to 2.0.
+            // coherent fine detail stays ~0.72..0.95, noisy texture goes up to aq_hi_cap.
             float norm_mask = block_raw_mask[bidx] / median_mask;
-            lambda_scale *= Clamp(0.65f + 0.35f * norm_mask, 0.55f, aq_hi_cap);
+            lambda_scale *= Clamp(0.65f + 0.35f * norm_mask, 0.45f, aq_hi_cap);
           }
         }
         if (sharpyuv_luma) {
