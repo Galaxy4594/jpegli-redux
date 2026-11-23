@@ -344,7 +344,7 @@ void AccumulatePlainAcHistogram(const int16_t* cblock, const float* qmc,
 void TrellisQuantizeBlock(int16_t* cblock, const float* qmc,
                           const AcPrices& prices, const float weights[DCTSIZE2],
                           float lambda, float dc_threshold,
-                          int16_t* last_dc_coeff) {
+                          float dc_only_penalty, int16_t* last_dc_coeff) {
   // Quantize DC with deadzone protection relative to previous block's DC.
   const float dc_ideal = static_cast<float>(cblock[0]) * qmc[0];
   int16_t dc;
@@ -480,6 +480,9 @@ void TrellisQuantizeBlock(int16_t* cblock, const float* qmc,
     float tail = prefix[63] - st.prefix;
     float eob = (st.position < 63) ? (lambda * prices.Eob()) : 0.0f;
     float cost = st.cost + tail + eob;
+    if (i == 0 && dc_only_penalty > 0.0f) {
+      cost += dc_only_penalty * prefix[63];
+    }
     if (cost < end_cost) {
       end_cost = cost;
       end = i;
@@ -734,9 +737,27 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
           dc_threshold *= (1.0f - 0.25f * darkness);
         }
 
+        float dc_only_penalty = 0.0f;
+        if (m->wasserstein_quant && is_luma && !block_ac_energy.empty() &&
+            comp->width_in_blocks >= 2 && comp->height_in_blocks >= 2) {
+          const size_t w_blk = comp->width_in_blocks;
+          const size_t h_blk = comp->height_in_blocks;
+          size_t y_up = (by > 0) ? (by - 1) : 0;
+          size_t y_dn = (by + 1 < h_blk) ? (by + 1) : (h_blk - 1);
+          size_t x_l = (bx > 0) ? (bx - 1) : 0;
+          size_t x_r = (bx + 1 < w_blk) ? (bx + 1) : (w_blk - 1);
+          float nbr_e = 0.25f * (block_ac_energy[by * w_blk + x_l] +
+                                 block_ac_energy[by * w_blk + x_r] +
+                                 block_ac_energy[y_up * w_blk + bx] +
+                                 block_ac_energy[y_dn * w_blk + bx]);
+          if (nbr_e > 4.0f) {
+            dc_only_penalty = 0.5f * Clamp((nbr_e - 4.0f) / 20.0f, 0.0f, 1.0f);
+          }
+        }
+
         TrellisQuantizeBlock(cblock, qmc, prices[tbl], weights,
                              base_lambda * lambda_scale, dc_threshold,
-                             &last_dc);
+                             dc_only_penalty, &last_dc);
       }
     }
   }
