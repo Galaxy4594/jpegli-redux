@@ -567,19 +567,10 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       0.4116935f, 0.4082483f, 0.3984095f, 0.3834825f, 0.3651484f, 0.3450328f, 0.3244428f, 0.3042903f,
   };
 
-  // Smooth Weber-Fechner brightness tilt LUT for Luma: pow(clamp(Y,16,255)/128, 0.40).
-  static const auto kLumaTiltLut = []() {
-    struct Lut {
-      float v[256];
-    } lut{};
-    for (int i = 0; i < 256; ++i) {
-      float ym = static_cast<float>(i < 16 ? 16 : i);
-      lut.v[i] = std::pow(ym / 128.0f, 0.40f);
-    }
-    return lut;
-  }();
-
   // Pass 2: Run sparse-bitmask Viterbi trellis per block.
+  // Note: brightness modulation is already handled once by GammaModulation
+  // inside ComputeAdaptiveQuantField (quant_field), so no duplicate luma
+  // brightness tilt is applied here.
   for (int c = 0; c < cinfo->num_components; ++c) {
     const jpeg_component_info* comp = &cinfo->comp_info[c];
     const int tbl = std::max(0, std::min(comp->ac_tbl_no, NUM_HUFF_TBLS - 1));
@@ -615,8 +606,7 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
           0.60f, 1.65f);
       float w = channel_weight * std::pow(step_ratio, 2.0f * kDistortionPower);
       if (m->wasserstein_quant && is_luma) {
-        // Gentle Sobolev H^-1 weighting centered near 1.0 so LF gradients are
-        // protected without starving HF fine detail.
+        // Internal Wasserstein / Sobolev H^-1 radial transport distortion metric.
         w *= (0.90f + 0.25f * kTransportW[k]);
       }
       weights[z] = w;
@@ -706,17 +696,6 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
             float norm_mask = block_raw_mask[bidx] / median_mask;
             lambda_scale *= Clamp(0.65f + 0.35f * norm_mask, 0.55f, aq_hi_cap);
           }
-        }
-        if (m->wasserstein_quant && is_luma) {
-          float ym = Clamp(dct0, 16.0f, 255.0f);
-          int idx = static_cast<int>(ym);
-          float frac = ym - static_cast<float>(idx);
-          float tilt = (idx < 255)
-                           ? (kLumaTiltLut.v[idx] +
-                              frac * (kLumaTiltLut.v[idx + 1] -
-                                      kLumaTiltLut.v[idx]))
-                           : kLumaTiltLut.v[255];
-          lambda_scale *= tilt;
         }
         if (sharpyuv_luma) {
           lambda_scale *= 0.88f;

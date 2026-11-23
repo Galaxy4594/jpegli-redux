@@ -468,8 +468,8 @@ void ComputeCoefficientBlock(const float* JPEGLI_RESTRICT pixels, size_t stride,
                              const float* clip_qmc = nullptr) {
   float* JPEGLI_RESTRICT dct = tmp;
   float* JPEGLI_RESTRICT scratch_space = tmp + DCTSIZE2;
-  if ((wasserstein_quant || clip_qmc != nullptr) &&
-      zero_bias_offset[63] > 0.585f) {
+  if (clip_qmc != nullptr ||
+      (wasserstein_quant && zero_bias_offset[63] > 0.585f)) {
     ContinueWhiteClipLuma(pixels, stride, clip_qmc ? clip_qmc : qmc, dct,
                           scratch_space);
   } else {

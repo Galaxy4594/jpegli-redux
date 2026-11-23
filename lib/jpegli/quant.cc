@@ -812,6 +812,20 @@ void InitQuantizer(j_compress_ptr cinfo, QuantPass pass) {
       }
     }
   }
+  if (m->trellis_rdoq) {
+    // Trellis RDOQ handles all AC quantization via its unified R-D objective
+    // in TrellisQuantizeCoeffs; only DC deadzone parameters are needed here.
+    for (int c = 0; c < cinfo->num_components; ++c) {
+      for (int k = 0; k < DCTSIZE2; ++k) {
+        m->zero_bias_mul[c][k] = 0.0f;
+        m->zero_bias_offset[c][k] = 0.0f;
+      }
+      if (cinfo->jpeg_color_space == JCS_YCbCr && c < 3) {
+        m->zero_bias_offset[c][0] = kZeroBiasOffsetYCbCrDC[c];
+      }
+    }
+    return;
+  }
   if (m->use_adaptive_quantization && m->adaptive_quantization_mode != 0) {
     for (int c = 0; c < cinfo->num_components; ++c) {
       for (int k = 0; k < DCTSIZE2; ++k) {
