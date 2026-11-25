@@ -142,7 +142,7 @@ struct Args {
 
     cmdline->AddOptionValue(
         '\0', "trellis_lambda", "FLOAT",
-        "Rate-distortion lambda for --trellis_rdoq (default: auto 0.05).",
+        "Rate-distortion lambda for --trellis_rdoq (default: auto).",
         &settings.trellis_lambda, &ParseFloat, 1);
 
     cmdline->AddOptionFlag(

@@ -1015,8 +1015,8 @@ void jpegli_set_adaptive_quantization_mode(j_compress_ptr cinfo, int mode) {
   cinfo->master->visual_energy_correction = (mode >= 2);
   cinfo->master->energy_based_rdoq = (mode >= 2);
   cinfo->master->wasserstein_quant = (mode >= 2);
+  cinfo->master->trellis_rdoq = (mode >= 3);
   if (mode >= 3) {
-    cinfo->master->trellis_rdoq = true;
     cinfo->master->progressive_level = 3;
   }
 }

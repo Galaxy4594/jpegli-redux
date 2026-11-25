@@ -145,6 +145,8 @@ void jpegli_mem_dest(j_compress_ptr cinfo, unsigned char** outbuffer,
         reinterpret_cast<uint8_t*>(malloc(jpegli::kDestBufferSize));
     *outbuffer = dest->temp_buffer;
     *outsize = jpegli::kDestBufferSize;
+  } else if (*outbuffer != dest->temp_buffer) {
+    dest->temp_buffer = nullptr;
   }
   dest->current_buffer = *outbuffer;
   dest->buffer_size = *outsize;

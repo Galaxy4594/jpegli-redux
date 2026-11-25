@@ -343,17 +343,10 @@ void AccumulatePlainAcHistogram(const int16_t* cblock, const float* qmc,
 // as Q4 unquantized DCT coefficients (cblock[z] * qmc[z] == ideal level).
 void TrellisQuantizeBlock(int16_t* cblock, const float* qmc,
                           const AcPrices& prices, const float weights[DCTSIZE2],
-                          float lambda, float dc_threshold,
-                          float dc_only_penalty, int16_t* last_dc_coeff) {
-  // Quantize DC with deadzone protection relative to previous block's DC.
-  const float dc_ideal = static_cast<float>(cblock[0]) * qmc[0];
-  int16_t dc;
-  if (std::fabs(dc_ideal - static_cast<float>(*last_dc_coeff)) < dc_threshold) {
-    dc = *last_dc_coeff;
-  } else {
-    dc = static_cast<int16_t>(std::lround(dc_ideal));
-  }
-  *last_dc_coeff = dc;
+                          float lambda, float dc_only_penalty) {
+  // Plain-round DC (matches jhm17 and avoids DC banding/blocking).
+  const int16_t dc = static_cast<int16_t>(
+      std::lround(static_cast<float>(cblock[0]) * qmc[0]));
 
   float ideal[DCTSIZE2];
   float prefix[DCTSIZE2];
@@ -618,9 +611,6 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       weights[z] = w;
     }
 
-    int16_t last_dc = 0;
-    const float dc_zb_offset = m->zero_bias_offset[c][0];
-    const float dc_zb_mul = m->zero_bias_mul[c][0];
     const bool use_aq = m->use_adaptive_quantization;
     const bool sharpyuv_luma = (m->use_sharpyuv && is_yuv420 && is_luma);
 
@@ -706,13 +696,8 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
 
     for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
       JBLOCKARRAY blocks = GetBlockRow(cinfo, c, by);
-      const float* qf = use_aq ? m->quant_field.Row(by * v_factor) : nullptr;
       for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
         int16_t* cblock = &blocks[0][bx][0];
-        const float aq_strength = use_aq ? qf[bx * h_factor] : 0.0f;
-
-        // Recover approximate mean luma (0..255) from Q4 centered DC.
-        const float dct0 = static_cast<float>(cblock[0]) / 128.0f + 128.0f;
 
         float lambda_scale = 1.0f;
         if (use_aq && !block_ac_energy.empty()) {
@@ -729,12 +714,6 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
         }
         if (sharpyuv_luma) {
           lambda_scale *= 0.88f;
-        }
-
-        float dc_threshold = dc_zb_offset + aq_strength * dc_zb_mul;
-        if (m->wasserstein_quant && is_luma && dct0 < 64.0f) {
-          float darkness = (64.0f - std::max(0.0f, dct0)) / 64.0f;
-          dc_threshold *= (1.0f - 0.25f * darkness);
         }
 
         float dc_only_penalty = 0.0f;
@@ -756,8 +735,7 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
         }
 
         TrellisQuantizeBlock(cblock, qmc, prices[tbl], weights,
-                             base_lambda * lambda_scale, dc_threshold,
-                             dc_only_penalty, &last_dc);
+                             base_lambda * lambda_scale, dc_only_penalty);
       }
     }
   }
