@@ -1236,13 +1236,20 @@ void OptimizeProgressiveScanScript(j_compress_ptr cinfo) {
     }
   }
 
-  cinfo->script_space_size = static_cast<int>(new_scans.size());
-  cinfo->script_space =
-      Allocate<jpeg_scan_info>(cinfo, cinfo->script_space_size, JPOOL_IMAGE);
+  // Keep script_space in JPOOL_PERMANENT (matching SetDefaultScanScript) so
+  // reusing cinfo across encodes cannot leave cinfo->scan_info pointing to
+  // freed JPOOL_IMAGE memory; reuse existing capacity to avoid permanent growth.
+  const int num_new_scans = static_cast<int>(new_scans.size());
+  if (cinfo->script_space == nullptr ||
+      num_new_scans > cinfo->script_space_size) {
+    cinfo->script_space_size = num_new_scans;
+    cinfo->script_space =
+        Allocate<jpeg_scan_info>(cinfo, cinfo->script_space_size);
+  }
   memcpy(cinfo->script_space, new_scans.data(),
          new_scans.size() * sizeof(jpeg_scan_info));
   cinfo->scan_info = cinfo->script_space;
-  cinfo->num_scans = cinfo->script_space_size;
+  cinfo->num_scans = num_new_scans;
 
   // Reallocate token_arrays for the chosen scan count so small images cannot
   // overflow the initial allocation made for the default scan script.
