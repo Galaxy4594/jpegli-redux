@@ -1085,6 +1085,225 @@ uint64_t CostACScan(const std::vector<PreparedACBlock>& blocks,
   return payload_bits + header_bits;
 }
 
+uint64_t FinalizeACScanCost(uint32_t freq[257], uint64_t raw_bits,
+                            uint64_t restarts, size_t stride) {
+  freq[256] = 1;  // Sentinel for all-1s code
+  uint8_t depth[257] = {};
+  uint32_t sym_count = 0;
+  for (int s = 0; s < 256; ++s) {
+    if (freq[s] > 0) ++sym_count;
+  }
+  if (sym_count == 0) {
+    freq[0] = 1;
+    sym_count = 1;
+  }
+  CreateHuffmanTree(freq, 257, kJpegHuffmanMaxBitLength, depth);
+
+  uint64_t huff_bits = 0;
+  for (int s = 0; s < 256; ++s) {
+    if (freq[s] > 0) {
+      huff_bits += static_cast<uint64_t>(freq[s]) * depth[s];
+    }
+  }
+  uint64_t payload_bits = (huff_bits + raw_bits + restarts * 23) * stride + 7;
+  uint64_t header_bits = (10 + 2 + 2 + 1 + 16 + sym_count) * 8;
+  return payload_bits + header_bits;
+}
+
+// Count EOB runs for a first AC scan 64 blocks at a time via bitsets
+// (ported from jhm17's count_eob_runs).
+void CountEobRuns64(const std::vector<uint64_t>& masks,
+                    const CandidateScan& scan, size_t interval,
+                    uint32_t runs[15]) {
+  memset(runs, 0, 15 * sizeof(uint32_t));
+  const uint64_t band =
+      (~uint64_t{0} << scan.ss) & (~uint64_t{0} >> (63 - scan.se));
+  const int se = scan.se;
+  const size_t n = masks.size();
+  for (size_t r_start = 0; r_start < n; r_start += interval) {
+    const size_t r_end = std::min(r_start + interval, n);
+    uint32_t eobrun = 0;
+    for (size_t w_start = r_start; w_start < r_end; w_start += 64) {
+      const size_t w_len = std::min<size_t>(64, r_end - w_start);
+      uint64_t nonzero = 0;
+      uint64_t eob = 0;
+      for (size_t i = 0; i < w_len; ++i) {
+        const uint64_t m = masks[w_start + i];
+        nonzero |= static_cast<uint64_t>((m & band) != 0) << i;
+        eob |= ((~m >> se) & uint64_t{1}) << i;
+      }
+      if (nonzero == 0) {
+        eobrun += static_cast<uint32_t>(w_len);
+        if (eobrun >= 0x7FFF) {
+          ++runs[14];
+          eobrun -= 0x7FFF;
+        }
+        continue;
+      }
+      const uint32_t first = static_cast<uint32_t>(TrailingZeros64(nonzero));
+      eobrun += first;
+      if (eobrun >= 0x7FFF) {
+        ++runs[14];
+        eobrun -= 0x7FFF;
+      }
+      if (eobrun > 0) {
+        ++runs[jpegli::FloorLog2Nonzero<uint32_t>(eobrun)];
+      }
+      runs[0] +=
+          static_cast<uint32_t>(PopCount64(nonzero & (nonzero << 1) & (eob << 1)));
+      uint64_t gaps = nonzero & ~(nonzero << 1) & ~(uint64_t{1} << first);
+      while (gaps != 0) {
+        const uint32_t i = static_cast<uint32_t>(TrailingZeros64(gaps));
+        gaps &= gaps - 1;
+        const uint32_t prev = static_cast<uint32_t>(
+            63 - LeadingZeros64(nonzero & ((uint64_t{1} << i) - 1)));
+        const uint32_t run =
+            i - prev - 1 + static_cast<uint32_t>((eob >> prev) & 1);
+        ++runs[jpegli::FloorLog2Nonzero<uint32_t>(run)];
+      }
+      const uint32_t last = static_cast<uint32_t>(63 - LeadingZeros64(nonzero));
+      eobrun = static_cast<uint32_t>(w_len) - 1 - last +
+               static_cast<uint32_t>((eob >> last) & 1);
+    }
+    if (eobrun > 0) {
+      ++runs[jpegli::FloorLog2Nonzero<uint32_t>(eobrun)];
+    }
+  }
+}
+
+// Cost all first-AC scans (ah == 0) sharing the same `al` in a single pass
+// over `blocks` via elementary segment-pair histograms + 64-block EOB bitsets
+// (ported from jhm17's count_first_scans). Bit-exact with CostACScan().
+void CostFirstACScansSinglePass(const std::vector<PreparedACBlock>& blocks,
+                                const std::vector<CandidateScan>& scans,
+                                size_t restart_interval, size_t stride,
+                                std::vector<uint64_t>* out_costs) {
+  out_costs->resize(scans.size());
+  if (scans.empty()) return;
+  const uint8_t al = scans[0].al;
+
+  std::vector<int> cuts = {1, 64};
+  std::vector<int> starts;
+  cuts.reserve(scans.size() * 2 + 2);
+  starts.reserve(scans.size());
+  for (const auto& sc : scans) {
+    cuts.push_back(sc.ss);
+    cuts.push_back(sc.se + 1);
+    starts.push_back(sc.ss);
+  }
+  std::sort(cuts.begin(), cuts.end());
+  cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+  std::sort(starts.begin(), starts.end());
+  starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+
+  const size_t segments = cuts.size() - 1;
+  size_t segment_of[64] = {};
+  for (size_t seg = 0; seg < segments; ++seg) {
+    for (int k = cuts[seg]; k < cuts[seg + 1]; ++k) {
+      segment_of[k] = seg;
+    }
+  }
+
+  std::vector<uint32_t> pairs(segments * segments * 256, 0);
+  // First-nonzero counts per distinct `ss`: [pos 0..64][size 0..15] (16 slots/pos).
+  static constexpr size_t kSizes = 16;
+  static constexpr size_t kFirstSlots = 65 * kSizes;
+  std::vector<uint32_t> firsts(starts.size() * kFirstSlots, 0);
+
+  const size_t nblocks = blocks.size();
+  std::vector<uint64_t> masks(nblocks);
+  for (size_t b = 0; b < nblocks; ++b) {
+    const PreparedACBlock& blk = blocks[b];
+    const uint64_t nonzero = blk.nonzero[al] & ~uint64_t{1};
+    masks[b] = nonzero;
+
+    for (size_t si = 0; si < starts.size(); ++si) {
+      const uint64_t from = nonzero & (~uint64_t{0} << starts[si]);
+      const size_t k = from ? static_cast<size_t>(TrailingZeros64(from)) : 64;
+      const size_t sz = from ? static_cast<size_t>(blk.size_at(static_cast<int>(k)) - al) : 0;
+      firsts[si * kFirstSlots + k * kSizes + sz] += 1;
+    }
+
+    uint64_t rest = nonzero;
+    if (rest != 0) {
+      int prev = TrailingZeros64(rest);
+      size_t row = segment_of[prev] * segments;
+      rest &= rest - 1;
+      while (rest != 0) {
+        const int k = TrailingZeros64(rest);
+        rest &= rest - 1;
+        const int run = k - prev - 1;
+        const size_t cls = row + segment_of[k];
+        const int sz = blk.size_at(k) - al;
+        const uint8_t sym = static_cast<uint8_t>(((run & 15) << 4) + sz);
+        if (run > 15) {
+          pairs[cls * 256 + 0xF0] += static_cast<uint32_t>(run >> 4);
+        }
+        pairs[cls * 256 + sym] += 1;
+        prev = k;
+        row = segment_of[k] * segments;
+      }
+    }
+  }
+
+  const size_t interval =
+      restart_interval > 0 ? restart_interval : std::max<size_t>(nblocks, 1);
+  const uint64_t restarts =
+      nblocks > 0 ? static_cast<uint64_t>(DivCeil(nblocks, interval) - 1) : 0;
+
+  for (size_t idx = 0; idx < scans.size(); ++idx) {
+    const CandidateScan& sc = scans[idx];
+    uint32_t freq[257] = {};
+    uint64_t raw_bits = 0;
+
+    const size_t start_idx = static_cast<size_t>(
+        std::lower_bound(starts.begin(), starts.end(), static_cast<int>(sc.ss)) -
+        starts.begin());
+    const uint32_t* first = &firsts[start_idx * kFirstSlots];
+    for (int k = sc.ss; k <= sc.se; ++k) {
+      const int run = k - sc.ss;
+      const uint32_t* row = &first[static_cast<size_t>(k) * kSizes];
+      for (size_t sz = 1; sz < kSizes; ++sz) {
+        const uint32_t count = row[sz];
+        if (count > 0) {
+          const uint8_t sym = static_cast<uint8_t>(((run & 15) << 4) + sz);
+          freq[sym] += count;
+          if (run > 15) {
+            freq[0xF0] += static_cast<uint32_t>(run >> 4) * count;
+          }
+          raw_bits += static_cast<uint64_t>(sz) * count;
+        }
+      }
+    }
+
+    uint32_t runs[15];
+    CountEobRuns64(masks, sc, interval, runs);
+    for (int nbits = 0; nbits < 15; ++nbits) {
+      if (runs[nbits] > 0) {
+        freq[nbits << 4] += runs[nbits];
+        raw_bits += static_cast<uint64_t>(nbits) * runs[nbits];
+      }
+    }
+
+    const size_t first_seg = segment_of[sc.ss];
+    const size_t last_seg = segment_of[sc.se];
+    for (size_t earlier = first_seg; earlier <= last_seg; ++earlier) {
+      for (size_t later = earlier; later <= last_seg; ++later) {
+        const uint32_t* p = &pairs[(earlier * segments + later) * 256];
+        for (int s = 0; s < 256; ++s) {
+          const uint32_t count = p[s];
+          if (count > 0) {
+            freq[s] += count;
+            raw_bits += static_cast<uint64_t>(count) * static_cast<uint64_t>(s & 15);
+          }
+        }
+      }
+    }
+
+    (*out_costs)[idx] = FinalizeACScanCost(freq, raw_bits, restarts, stride);
+  }
+}
+
 std::vector<std::vector<CandidateScan>> BuildCandidateACScripts(bool is_luma) {
   std::vector<std::vector<CandidateScan>> scripts;
   auto add_partition = [&](const std::vector<std::pair<uint8_t, uint8_t>>& bands,
@@ -1201,7 +1420,29 @@ void OptimizeProgressiveScanScript(j_compress_ptr cinfo) {
 
     const auto candidates = BuildCandidateACScripts(c == 0);
     std::vector<std::pair<CandidateScan, uint64_t>> cache;
-    cache.reserve(32);
+    cache.reserve(64);
+    // Group all unique first-AC scans (ah == 0) by `al` so each `al` is
+    // counted in a single pass over `sample` instead of once per band.
+    std::vector<CandidateScan> first_groups[4];
+    for (const auto& script : candidates) {
+      for (const auto& sc : script) {
+        if (sc.ah == 0 && sc.al < 4) {
+          auto& grp = first_groups[sc.al];
+          if (std::find(grp.begin(), grp.end(), sc) == grp.end()) {
+            grp.push_back(sc);
+          }
+        }
+      }
+    }
+    std::vector<uint64_t> group_costs;
+    for (int al = 0; al < 4; ++al) {
+      if (first_groups[al].empty()) continue;
+      CostFirstACScansSinglePass(sample, first_groups[al], sampled_restart,
+                                 stride, &group_costs);
+      for (size_t i = 0; i < first_groups[al].size(); ++i) {
+        cache.emplace_back(first_groups[al][i], group_costs[i]);
+      }
+    }
     const auto get_cost = [&](const CandidateScan& sc) -> uint64_t {
       for (const auto& entry : cache) {
         if (entry.first == sc) return entry.second;
