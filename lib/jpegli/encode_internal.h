@@ -152,6 +152,7 @@ struct jpeg_comp_master {
   float min_distance;
   float max_distance;
   float color_shift_correction;
+  float chroma_ac_scale;
   float aq_scale;
   uint8_t* text_block_map[jpegli::kMaxComponents];
   jpegli::RowBuffer<float> sharpyuv_workspace[13];

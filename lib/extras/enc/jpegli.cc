@@ -326,6 +326,38 @@ Status EncodeJpegToTargetSize(const PackedPixelFile& ppf,
 
 }  // namespace
 
+float DetectSaturatedRedChromaScale(const PackedPixelFile& ppf) {
+  static constexpr int kSaturatedRedCr = 90;
+  static constexpr float kSaturatedRedChromaScale = 0.85f;
+  uint64_t hist[129] = {};
+  uint64_t total = 0;
+  for (const auto& frame : ppf.frames) {
+    const PackedImage& img = frame.color;
+    if (img.format.num_channels < 3) continue;
+    for (size_t y = 0; y < img.ysize; y += 4) {
+      for (size_t x = 0; x < img.xsize; ++x) {
+        float r = img.GetPixelValue(y, x, 0);
+        float g = img.GetPixelValue(y, x, 1);
+        float b = img.GetPixelValue(y, x, 2);
+        float cr = 255.0f * (0.5f * r - 0.418688f * g - 0.081312f * b);
+        int mag = static_cast<int>(std::abs(cr) + 0.5f);
+        if (mag > 128) mag = 128;
+        ++hist[mag];
+        ++total;
+      }
+    }
+  }
+  if (total == 0) return 1.0f;
+  uint64_t below = 0;
+  for (int m = 0; m <= 128; ++m) {
+    below += hist[m];
+    if (below * 100 > total * 99) {
+      return (m >= kSaturatedRedCr) ? kSaturatedRedChromaScale : 1.0f;
+    }
+  }
+  return 1.0f;
+}
+
 Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
                   ThreadPool* pool, std::vector<uint8_t>* compressed) {
   if (jpeg_settings.libjpeg_quality > 0) {
@@ -488,6 +520,14 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
     if (jpeg_settings.color_shift_correction >= 0.0f) {
       jpegli_set_color_shift_correction(&cinfo,
                                         jpeg_settings.color_shift_correction);
+    }
+    float chroma_ac_scale = jpeg_settings.chroma_ac_scale;
+    if (chroma_ac_scale < 0.0f && !jpeg_settings.xyb &&
+        !jpeg_settings.use_std_quant_tables) {
+      chroma_ac_scale = DetectSaturatedRedChromaScale(ppf);
+    }
+    if (chroma_ac_scale > 0.0f && chroma_ac_scale != 1.0f) {
+      jpegli_set_chroma_ac_scale(&cinfo, chroma_ac_scale);
     }
     if (jpeg_settings.psnr_target > 0.0) {
       jpegli_set_psnr(&cinfo, jpeg_settings.psnr_target,

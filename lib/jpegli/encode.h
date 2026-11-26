@@ -196,6 +196,10 @@ void jpegli_use_standard_quant_tables(j_compress_ptr cinfo);
 // details caused by asymmetric Cb/Cr quantization and RDOQ zones.
 void jpegli_set_color_shift_correction(j_compress_ptr cinfo, float factor);
 
+// Scales Chroma AC quantization steps (default: 1.0; < 1.0 protects saturated
+// chroma such as red/cyan graphics).
+void jpegli_set_chroma_ac_scale(j_compress_ptr cinfo, float scale);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

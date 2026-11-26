@@ -648,7 +648,7 @@ void RefineGradientEdgeRinging(const int16_t* raw_cblock, int16_t* cblock,
       float g = std::max(
           std::max(std::abs(orig[y * 8 + xp] - v), std::abs(v - orig[y * 8 + xm])),
           std::max(std::abs(orig[yp * 8 + x] - v), std::abs(v - orig[ym * 8 + x])));
-      float mi = std::max(0.35f, 1.0f / (1.0f + mask_blend * g * g * inv_c2));
+      float mi = std::max(0.50f, 1.0f / (1.0f + mask_blend * g * g * inv_c2));
       M[i] = mi;
       sum_m += mi;
 
@@ -672,7 +672,7 @@ void RefineGradientEdgeRinging(const int16_t* raw_cblock, int16_t* cblock,
       if (sm) ++smooth_count;
     }
   }
-  if (smooth_count < 36) return;
+  if (smooth_count < 42) return;
 
   // Per-pixel local smooth bounds [loc_min[i], loc_max[i]] over pixel i and its
   // 4-connected smooth neighbors. Unlike a single block-wide [min, max], this
@@ -739,7 +739,7 @@ void RefineGradientEdgeRinging(const int16_t* raw_cblock, int16_t* cblock,
       }
     }
   }
-  if (stroke_lines > 1) return;
+  if (stroke_lines > 0) return;
 
   const float avg_m = sum_m * (1.0f / 64.0f);
   float avg_q2_w = 0.0f;
@@ -845,8 +845,8 @@ void RefineGradientEdgeRinging(const int16_t* raw_cblock, int16_t* cblock,
     }
   };
 
-  // Candidates 1-3: High-lambda trellis proposals (1.8x, 3.0x, 5.0x).
-  for (float mult : {1.8f, 3.0f, 5.0f}) {
+  // Candidates 1-2: Gentle high-lambda trellis proposals (1.5x, 2.5x).
+  for (float mult : {1.5f, 2.5f}) {
     int16_t tmp[DCTSIZE2];
     memcpy(tmp, raw_cblock, DCTSIZE2 * sizeof(int16_t));
     TrellisQuantizeBlock(tmp, qmc, prices, weights, trellis_lambda * mult,
@@ -1547,8 +1547,21 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
              text_score <= 0.05f);
         const bool do_spatial_refine =
             m->spatial_refine && (text_score > 0.05f || (is_luma && has_clip));
-        const bool do_dering_refine =
-            m->spatial_refine && !do_spatial_refine && has_smooth_edge;
+        // Only apply gradient+edge deringing to blocks bordering a genuinely
+        // smooth slow gradient (at least one 4-connected neighbor in
+        // block_is_smooth), leaving busy high-energy detail untouched.
+        bool has_smooth_nbr = is_smooth_grad;
+        if (!has_smooth_nbr && !block_is_smooth.empty()) {
+          const size_t h_blk_c = comp->height_in_blocks;
+          if ((bx > 0 && block_is_smooth[bidx - 1]) ||
+              (bx + 1 < w_blk_c && block_is_smooth[bidx + 1]) ||
+              (by > 0 && block_is_smooth[bidx - w_blk_c]) ||
+              (by + 1 < h_blk_c && block_is_smooth[bidx + w_blk_c])) {
+            has_smooth_nbr = true;
+          }
+        }
+        const bool do_dering_refine = m->spatial_refine && !do_spatial_refine &&
+                                      has_smooth_edge && has_smooth_nbr;
         // Apply causal seam-continuity refinement on smooth Chroma gradients
         // (where quantization steps are coarser and 8x8 hue blocking appears)
         // while keeping Luma drift-free on natural photography.
@@ -1612,11 +1625,11 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
                                  is_luma, has_clip);
         }
         if (do_dering_refine) {
-          // Automatically scale deringing strength with target Butteraugli
-          // distance: gentle at Q90 (d<=1.0 -> 0.25) to preserve crisp photo
-          // corners, ramping up smoothly toward 0.85 at coarse low qualities.
+          // Gentle distance-adaptive deringing ramp restricted to slow-gradient
+          // boundary blocks: 0.15 at high quality (d<=1.5), ramping gently up
+          // to 0.55 at coarse low qualities.
           const float auto_dering =
-              Clamp(0.25f + 0.12f * std::max(0.0f, distance - 1.0f), 0.25f, 0.85f);
+              Clamp(0.15f + 0.08f * std::max(0.0f, distance - 1.5f), 0.15f, 0.55f);
           RefineGradientEdgeRinging(raw_cblock, cblock, qmc, qtable->quantval,
                                     prices[tbl], weights,
                                     base_lambda * lambda_scale, dc_only_penalty,

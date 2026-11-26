@@ -812,6 +812,10 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
           }
         }
       }
+      if (!xyb && !m->use_std_tables && quant_idx > 0 && k > 0 &&
+          m->chroma_ac_scale != 1.0f) {
+        base_val *= m->chroma_ac_scale;
+      }
       int qval = std::round(scale * base_val);
       (*qtable)->quantval[k] = std::max(1, std::min(qval, quant_max));
     }

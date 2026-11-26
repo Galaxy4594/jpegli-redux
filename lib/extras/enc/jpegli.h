@@ -58,7 +58,14 @@ struct JpegSettings {
   // Factor in [0.0, 1.0] to align Cb quantization and dead-zoning with Cr,
   // preventing color shifting in fine yellow and warm details.
   float color_shift_correction = 1.0f;
+  // Chroma AC step multiplier (< 0.0f = auto saturated-red protection,
+  // 1.0f = neutral, < 1.0f = finer chroma AC steps).
+  float chroma_ac_scale = -1.0f;
 };
+
+// Returns 0.85f when the 99th percentile of |Cr - 128| over every 4th row
+// reaches 90 (saturated red/cyan/magenta content), and 1.0f otherwise.
+float DetectSaturatedRedChromaScale(const PackedPixelFile& ppf);
 
 Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
                   ThreadPool* pool, std::vector<uint8_t>* compressed);

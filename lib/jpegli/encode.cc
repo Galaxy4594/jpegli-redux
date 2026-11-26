@@ -759,6 +759,7 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->spatial_refine = true;
   cinfo->master->trellis_lambda = -1.0f;
   cinfo->master->color_shift_correction = 1.0f;
+  cinfo->master->chroma_ac_scale = 1.0f;
   cinfo->master->aq_scale = -1.0f;
   cinfo->master->distance = -1.0f;
   cinfo->master->progressive_level = jpegli::kDefaultProgressiveLevel;
@@ -1477,4 +1478,9 @@ void jpegli_destroy_compress(j_compress_ptr cinfo) {
 void jpegli_set_color_shift_correction(j_compress_ptr cinfo, float factor) {
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->color_shift_correction = factor;
+}
+
+void jpegli_set_chroma_ac_scale(j_compress_ptr cinfo, float scale) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->chroma_ac_scale = std::max(0.25f, std::min(2.0f, scale));
 }

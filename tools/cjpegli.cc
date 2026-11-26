@@ -361,6 +361,15 @@ int CJpegliMain(int argc, const char* argv[]) {
     if (!args.quiet && correction > 0.0f) {
       fprintf(stderr, "Color shift correction factor: %.3f\n", correction);
     }
+    // Auto-detect saturated red/cyan/magenta content once up front so
+    // --target_size iterations reuse the result without re-scanning.
+    if (!args.settings.xyb && !args.settings.use_std_quant_tables) {
+      float sat_scale = jpegli::extras::DetectSaturatedRedChromaScale(ppf);
+      args.settings.chroma_ac_scale = sat_scale;
+      if (!args.quiet && sat_scale != 1.0f) {
+        fprintf(stderr, "Saturated chroma AC scale: %.2f\n", sat_scale);
+      }
+    }
   }
 
   if (!ValidateArgs(args) || !SetDistance(args, cmdline, &args.settings)) {
