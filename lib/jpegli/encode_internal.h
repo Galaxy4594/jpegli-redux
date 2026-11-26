@@ -83,6 +83,7 @@ struct jpeg_comp_master {
   bool energy_based_rdoq;
   bool wasserstein_quant;
   bool trellis_rdoq;
+  bool spatial_refine;
   float trellis_lambda;
   float distance;
   int progressive_level;

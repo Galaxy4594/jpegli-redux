@@ -512,7 +512,8 @@ void AllocateBuffers(j_compress_ptr cinfo) {
   for (int c = 0; c < kMaxComponents; ++c) {
     m->text_block_map[c] = nullptr;
   }
-  if (m->trellis_rdoq && cinfo->jpeg_color_space == JCS_YCbCr) {
+  if (m->trellis_rdoq && m->spatial_refine &&
+      cinfo->jpeg_color_space == JCS_YCbCr) {
     for (int c = 0; c < cinfo->num_components; ++c) {
       jpeg_component_info* comp = &cinfo->comp_info[c];
       const size_t nblocks =
@@ -755,6 +756,7 @@ void jpegli_CreateCompress(j_compress_ptr cinfo, int version,
   cinfo->master->energy_based_rdoq = true;
   cinfo->master->wasserstein_quant = true;
   cinfo->master->trellis_rdoq = false;
+  cinfo->master->spatial_refine = true;
   cinfo->master->trellis_lambda = -1.0f;
   cinfo->master->color_shift_correction = 1.0f;
   cinfo->master->aq_scale = -1.0f;
@@ -1085,6 +1087,11 @@ void jpegli_enable_wasserstein_quant(j_compress_ptr cinfo, boolean value) {
 void jpegli_enable_trellis_rdoq(j_compress_ptr cinfo, boolean value) {
   CheckState(cinfo, jpegli::kEncStart);
   cinfo->master->trellis_rdoq = FROM_JPEGLI_BOOL(value);
+}
+
+void jpegli_enable_spatial_refine(j_compress_ptr cinfo, boolean value) {
+  CheckState(cinfo, jpegli::kEncStart);
+  cinfo->master->spatial_refine = FROM_JPEGLI_BOOL(value);
 }
 
 void jpegli_set_trellis_lambda(j_compress_ptr cinfo, float lambda) {

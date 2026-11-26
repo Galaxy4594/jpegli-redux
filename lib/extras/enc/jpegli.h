@@ -35,6 +35,7 @@ struct JpegSettings {
   int energy_based_rdoq = -1;
   bool wasserstein_quant = false;
   bool trellis_rdoq = false;
+  bool spatial_refine = true;
   float trellis_lambda = -1.0f;
   // Adaptive quantization scale factor. If negative (default: -1.0f), auto.
   float aq_scale = -1.0f;

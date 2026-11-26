@@ -476,6 +476,8 @@ Status EncodeJpeg(const PackedPixelFile& ppf, const JpegSettings& jpeg_settings,
         &cinfo, jpeg_settings.wasserstein_quant ? TRUE : FALSE);
     jpegli_enable_trellis_rdoq(&cinfo,
                                jpeg_settings.trellis_rdoq ? TRUE : FALSE);
+    jpegli_enable_spatial_refine(&cinfo,
+                                 jpeg_settings.spatial_refine ? TRUE : FALSE);
     if (jpeg_settings.trellis_lambda >= 0.0f) {
       jpegli_set_trellis_lambda(&cinfo, jpeg_settings.trellis_lambda);
     }

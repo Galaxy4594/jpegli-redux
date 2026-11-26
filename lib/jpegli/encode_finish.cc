@@ -575,6 +575,371 @@ JPEGLI_INLINE float DeltaAcBits(int z, int old_q, int new_q, int prev_nz,
   return seg_bits(new_q) - seg_bits(old_q);
 }
 
+// Total AC Huffman bit cost of a quantized zigzag block under `prices`.
+float ComputeAcBits(const int16_t* cblock, const AcPrices& prices) {
+  int last = 0;
+  for (int z = 63; z >= 1; --z) {
+    if (cblock[z] != 0) {
+      last = z;
+      break;
+    }
+  }
+  if (last == 0) return prices.Eob();
+  float bits = 0.0f;
+  int prev = 0;
+  for (int z = 1; z <= last; ++z) {
+    int v = cblock[z];
+    if (v != 0) {
+      bits += prices.Nonzero(z - prev - 1, SizeOfLevel(std::abs(v)));
+      prev = z;
+    }
+  }
+  if (last < 63) bits += prices.Eob();
+  return bits;
+}
+
+// Fast O(64) contrast-masked + asymmetric-ringing whole-block candidate
+// selector for mixed smooth-gradient + sharp-edge blocks (a fast local proxy
+// for jhm17's SSIMULACRA2/CVVDP polish preference: gently softening/clipping a
+// small high-contrast edge/corner rather than dumping Gibbs ringing across the
+// adjacent smooth gradient).
+void RefineGradientEdgeRinging(const int16_t* raw_cblock, int16_t* cblock,
+                               const float* qmc, const UINT16* quantval,
+                               const AcPrices& prices, const float* weights,
+                               float trellis_lambda, float dc_only_penalty,
+                               float dering_strength, bool is_luma) {
+  // Reconstruct original pixels (1/128 precision) once.
+  float raw_dct[DCTSIZE2];
+  raw_dct[0] = 128.0f + static_cast<float>(raw_cblock[0]) * (1.0f / 128.0f);
+  for (int z = 1; z < DCTSIZE2; ++z) {
+    int k = kJPEGNaturalOrder[z];
+    raw_dct[k] = static_cast<float>(raw_cblock[z]) * (1.0f / 128.0f);
+  }
+  HWY_ALIGN float orig[DCTSIZE2];
+  SeparableIdctFromNatural(raw_dct, orig);
+  if (is_luma) {
+    for (int i = 0; i < DCTSIZE2; ++i) {
+      orig[i] = Clamp(orig[i], 0.0f, 255.0f);
+    }
+  }
+
+  // Per-pixel contrast-masking weight M[i] (CVVDP proxy) and 2nd-derivative
+  // smoothness mask + original Laplacian magnitudes (SSIMULACRA2 ringing proxy).
+  HWY_ALIGN float M[DCTSIZE2];
+  HWY_ALIGN float abs_lh_orig[DCTSIZE2];
+  HWY_ALIGN float abs_lv_orig[DCTSIZE2];
+  HWY_ALIGN float loc_min[DCTSIZE2];
+  HWY_ALIGN float loc_max[DCTSIZE2];
+  uint8_t is_smooth[DCTSIZE2];
+  const float c_mask = is_luma ? 24.0f : 18.0f;
+  const float inv_c2 = 1.0f / (c_mask * c_mask);
+  const float mask_blend = std::min(1.0f, dering_strength);
+  const float lap_eps = is_luma ? 3.5f : 2.5f;
+  float sum_m = 0.0f;
+  int smooth_count = 0;
+  for (int y = 0; y < 8; ++y) {
+    int ym = (y > 0) ? (y - 1) : 0;
+    int yp = (y < 7) ? (y + 1) : 7;
+    for (int x = 0; x < 8; ++x) {
+      int xm = (x > 0) ? (x - 1) : 0;
+      int xp = (x < 7) ? (x + 1) : 7;
+      int i = y * 8 + x;
+      float v = orig[i];
+      float g = std::max(
+          std::max(std::abs(orig[y * 8 + xp] - v), std::abs(v - orig[y * 8 + xm])),
+          std::max(std::abs(orig[yp * 8 + x] - v), std::abs(v - orig[ym * 8 + x])));
+      float mi = std::max(0.35f, 1.0f / (1.0f + mask_blend * g * g * inv_c2));
+      M[i] = mi;
+      sum_m += mi;
+
+      float lh = (x > 0 && x < 7)
+                     ? std::abs(orig[y * 8 + x - 1] - 2.0f * v + orig[y * 8 + x + 1])
+                     : 0.0f;
+      float lv = (y > 0 && y < 7)
+                     ? std::abs(orig[(y - 1) * 8 + x] - 2.0f * v + orig[(y + 1) * 8 + x])
+                     : 0.0f;
+      abs_lh_orig[i] = lh;
+      abs_lv_orig[i] = lv;
+      bool sm = (lh <= lap_eps && lv <= lap_eps);
+      // On block borders one 2nd-difference axis is unavailable; also require
+      // a low 1st-derivative gradient so a sharp corner pixel at x/y in {0,7}
+      // is not misclassified as smooth or allowed to pollute local ranges.
+      if (sm && (x == 0 || x == 7 || y == 0 || y == 7)) {
+        const float border_g_eps = is_luma ? 10.0f : 7.0f;
+        if (g > border_g_eps) sm = false;
+      }
+      is_smooth[i] = sm ? 1 : 0;
+      if (sm) ++smooth_count;
+    }
+  }
+  if (smooth_count < 36) return;
+
+  // Per-pixel local smooth bounds [loc_min[i], loc_max[i]] over pixel i and its
+  // 4-connected smooth neighbors. Unlike a single block-wide [min, max], this
+  // stays tight on BOTH sides of a half-split diagonal edge so Gibbs darkening
+  // and brightening halos on either side of the edge are detected accurately.
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 8; ++x) {
+      int i = y * 8 + x;
+      float mn = orig[i];
+      float mx = orig[i];
+      if (is_smooth[i]) {
+        if (x > 0 && is_smooth[i - 1]) {
+          mn = std::min(mn, orig[i - 1]);
+          mx = std::max(mx, orig[i - 1]);
+        }
+        if (x < 7 && is_smooth[i + 1]) {
+          mn = std::min(mn, orig[i + 1]);
+          mx = std::max(mx, orig[i + 1]);
+        }
+        if (y > 0 && is_smooth[i - 8]) {
+          mn = std::min(mn, orig[i - 8]);
+          mx = std::max(mx, orig[i - 8]);
+        }
+        if (y < 7 && is_smooth[i + 8]) {
+          mn = std::min(mn, orig[i + 8]);
+          mx = std::max(mx, orig[i + 8]);
+        }
+      }
+      loc_min[i] = mn;
+      loc_max[i] = mx;
+    }
+  }
+
+  // Distinguish a single clean edge/corner cutting into a smooth gradient
+  // (monotone per row/col) from thin 1-3px text strokes or barcodes (which
+  // jump up and back down inside the same 8px row/col). Never soften strokes.
+  const float stroke_thr = is_luma ? 20.0f : 14.0f;
+  int stroke_lines = 0;
+  for (int y = 0; y < 8; ++y) {
+    int last_sign = 0;
+    for (int x = 0; x < 7; ++x) {
+      float d = orig[y * 8 + x + 1] - orig[y * 8 + x];
+      int s = (d > stroke_thr) ? 1 : ((d < -stroke_thr) ? -1 : 0);
+      if (s != 0) {
+        if (last_sign != 0 && s != last_sign) {
+          ++stroke_lines;
+          break;
+        }
+        last_sign = s;
+      }
+    }
+  }
+  for (int x = 0; x < 8; ++x) {
+    int last_sign = 0;
+    for (int y = 0; y < 7; ++y) {
+      float d = orig[(y + 1) * 8 + x] - orig[y * 8 + x];
+      int s = (d > stroke_thr) ? 1 : ((d < -stroke_thr) ? -1 : 0);
+      if (s != 0) {
+        if (last_sign != 0 && s != last_sign) {
+          ++stroke_lines;
+          break;
+        }
+        last_sign = s;
+      }
+    }
+  }
+  if (stroke_lines > 1) return;
+
+  const float avg_m = sum_m * (1.0f / 64.0f);
+  float avg_q2_w = 0.0f;
+  for (int z = 1; z < DCTSIZE2; ++z) {
+    int k = kJPEGNaturalOrder[z];
+    float qk = static_cast<float>(quantval[k]);
+    avg_q2_w += (qk * qk) / weights[z];
+  }
+  avg_q2_w *= (1.0f / 63.0f);
+  const float lam_bits = trellis_lambda * avg_q2_w * avg_m;
+  // Normalize for 2nd-difference norm (Laplacian^2 is ~6x pixel^2), plus
+  // explicit Gibbs darkening/brightening halo penalty when smooth gradient
+  // pixels undershoot or overshoot their local smooth neighborhood beyond a
+  // perceptual JND margin.
+  const float ring_w = dering_strength * 0.25f;
+  const float halo_w = dering_strength * 1.0f;
+  const float ring_margin = is_luma ? 1.5f : 1.0f;
+  const float halo_margin = is_luma ? 1.5f : 1.0f;
+
+  auto eval_rec = [&](const float* rec, float* out_ring,
+                      float* out_halo) -> float {
+    float d_masked = 0.0f;
+    float d_ring = 0.0f;
+    float d_halo = 0.0f;
+    for (int y = 0; y < 8; ++y) {
+      for (int x = 0; x < 8; ++x) {
+        int i = y * 8 + x;
+        float v = is_luma ? Clamp(rec[i], 0.0f, 255.0f) : rec[i];
+        float e = v - orig[i];
+        d_masked += M[i] * e * e;
+        if (is_smooth[i]) {
+          if (v < loc_min[i] - halo_margin) {
+            float u = (loc_min[i] - halo_margin) - v;
+            d_halo += u * u;
+          } else if (v > loc_max[i] + halo_margin) {
+            float u = v - (loc_max[i] + halo_margin);
+            d_halo += u * u;
+          }
+          if (x > 0 && x < 7) {
+            float vl = is_luma ? Clamp(rec[i - 1], 0.0f, 255.0f) : rec[i - 1];
+            float vr = is_luma ? Clamp(rec[i + 1], 0.0f, 255.0f) : rec[i + 1];
+            float lh = std::abs(vl - 2.0f * v + vr);
+            float ex = lh - abs_lh_orig[i] - ring_margin;
+            if (ex > 0.0f) d_ring += ex * ex;
+          }
+          if (y > 0 && y < 7) {
+            float vt = is_luma ? Clamp(rec[i - 8], 0.0f, 255.0f) : rec[i - 8];
+            float vb = is_luma ? Clamp(rec[i + 8], 0.0f, 255.0f) : rec[i + 8];
+            float lv = std::abs(vt - 2.0f * v + vb);
+            float ex = lv - abs_lv_orig[i] - ring_margin;
+            if (ex > 0.0f) d_ring += ex * ex;
+          }
+        }
+      }
+    }
+    if (out_ring) *out_ring = d_ring;
+    if (out_halo) *out_halo = d_halo;
+    return d_masked + ring_w * d_ring + halo_w * d_halo;
+  };
+
+  auto recon_block = [&](const int16_t* cand, float* rec) {
+    float cur_dct[DCTSIZE2];
+    cur_dct[0] =
+        128.0f + static_cast<float>(cand[0]) * (static_cast<float>(quantval[0]) * 0.125f);
+    for (int z = 1; z < DCTSIZE2; ++z) {
+      int k = kJPEGNaturalOrder[z];
+      cur_dct[k] =
+          static_cast<float>(cand[z]) * (static_cast<float>(quantval[k]) * 0.125f);
+    }
+    SeparableIdctFromNatural(cur_dct, rec);
+  };
+
+  auto eval_candidate = [&](const int16_t* cand, float* out_ring,
+                            float* out_halo) -> float {
+    HWY_ALIGN float rec[DCTSIZE2];
+    recon_block(cand, rec);
+    return eval_rec(rec, out_ring, out_halo) +
+           lam_bits * ComputeAcBits(cand, prices);
+  };
+
+  float base_ring = 0.0f;
+  float base_halo = 0.0f;
+  float best_cost = eval_candidate(cblock, &base_ring, &base_halo);
+  // Early exit if current block already has negligible ringing and halo.
+  if (base_ring <= 4.0f && base_halo <= 4.0f) return;
+
+  int16_t best_cand[DCTSIZE2];
+  memcpy(best_cand, cblock, DCTSIZE2 * sizeof(int16_t));
+
+  // Build up to 9 whole-block smoother candidates (high-lambda trellis,
+  // spectral low-pass truncations, and a monotone bilinear max(u,v)<=1
+  // candidate that preserves (1,1) while removing (0,2)/(2,0) troughs).
+  int16_t cands[9][DCTSIZE2];
+  int num_cands = 0;
+
+  auto add_unique = [&](const int16_t* cand) {
+    if (memcmp(cand, cblock, DCTSIZE2 * sizeof(int16_t)) == 0) return;
+    for (int i = 0; i < num_cands; ++i) {
+      if (memcmp(cand, cands[i], DCTSIZE2 * sizeof(int16_t)) == 0) return;
+    }
+    if (num_cands < 9) {
+      memcpy(cands[num_cands++], cand, DCTSIZE2 * sizeof(int16_t));
+    }
+  };
+
+  // Candidates 1-3: High-lambda trellis proposals (1.8x, 3.0x, 5.0x).
+  for (float mult : {1.8f, 3.0f, 5.0f}) {
+    int16_t tmp[DCTSIZE2];
+    memcpy(tmp, raw_cblock, DCTSIZE2 * sizeof(int16_t));
+    TrellisQuantizeBlock(tmp, qmc, prices, weights, trellis_lambda * mult,
+                         dc_only_penalty);
+    add_unique(tmp);
+  }
+  // Candidates 4-8: Spectral low-pass truncations of cblock.
+  const bool allow_linear_plane =
+      (smooth_count >= 50 && quantval[2] >= 14 && base_halo > 4.0f);
+  const int min_uv = allow_linear_plane ? 1 : ((smooth_count >= 42) ? 2 : 3);
+  for (int max_uv = 5; max_uv >= min_uv; --max_uv) {
+    int16_t tmp[DCTSIZE2];
+    memcpy(tmp, cblock, DCTSIZE2 * sizeof(int16_t));
+    for (int z = 1; z < DCTSIZE2; ++z) {
+      int k = kJPEGNaturalOrder[z];
+      int uv = (k >> 3) + (k & 7);
+      if (uv > max_uv) tmp[z] = 0;
+    }
+    add_unique(tmp);
+  }
+  // Candidate 9: Pure bilinear surface max(u, v) <= 1 (DC, (0,1), (1,0), (1,1)).
+  // Keeps corner saddle (1,1) monotone per row/col while zeroing (0,2)/(2,0)
+  // quadratic darkening/brightening troughs on tiny-corner blocks.
+  if (smooth_count >= 48 && quantval[2] >= 12 && base_halo > 4.0f) {
+    int16_t tmp[DCTSIZE2];
+    memcpy(tmp, cblock, DCTSIZE2 * sizeof(int16_t));
+    for (int z = 1; z < DCTSIZE2; ++z) {
+      int k = kJPEGNaturalOrder[z];
+      if ((k >> 3) > 1 || (k & 7) > 1) tmp[z] = 0;
+    }
+    add_unique(tmp);
+  }
+
+  for (int i = 0; i < num_cands; ++i) {
+    float cost = eval_candidate(cands[i], nullptr, nullptr);
+    if (cost < best_cost - 1e-2f) {
+      best_cost = cost;
+      memcpy(best_cand, cands[i], DCTSIZE2 * sizeof(int16_t));
+    }
+  }
+
+  // Fast 1-pass shrink-only coordinate descent over nonzero AC harmonics
+  // (u+v >= 2, zigzag z = 63..3) using precomputed DCT basis functions.
+  // Independently attenuates single offending ringing harmonics (e.g. (0,2),
+  // (2,0), (2,2), (1,2)) on half-split diagonal blocks without nuking the
+  // entire frequency band, while keeping DC, linear slopes (0,1)/(1,0), and
+  // fine high-quality (Q90+) harmonics untouched.
+  if (quantval[2] >= 8) {
+    const SpatialBasisTable& tbl = GetSpatialBasis();
+    HWY_ALIGN float cur_rec[DCTSIZE2];
+    HWY_ALIGN float try_rec[DCTSIZE2];
+    recon_block(best_cand, cur_rec);
+    float cur_dist = eval_rec(cur_rec, nullptr, nullptr);
+    for (int z = DCTSIZE2 - 1; z >= 3; --z) {
+      int16_t old_q = best_cand[z];
+      if (old_q == 0) continue;
+      int16_t new_q = (old_q > 0) ? (old_q - 1) : (old_q + 1);
+      int k = kJPEGNaturalOrder[z];
+      float step = static_cast<float>(quantval[k]) * 0.125f;
+      float delta = static_cast<float>(new_q - old_q) * step;
+      const float* b = tbl.basis[z];
+      for (int i = 0; i < DCTSIZE2; ++i) {
+        try_rec[i] = cur_rec[i] + delta * b[i];
+      }
+      int prev_nz = 0;
+      for (int p = z - 1; p >= 1; --p) {
+        if (best_cand[p] != 0) {
+          prev_nz = p;
+          break;
+        }
+      }
+      int next_nz = 64;
+      int next_size = 0;
+      for (int n = z + 1; n < DCTSIZE2; ++n) {
+        if (best_cand[n] != 0) {
+          next_nz = n;
+          next_size = SizeOfLevel(std::abs(static_cast<int>(best_cand[n])));
+          break;
+        }
+      }
+      float nd = eval_rec(try_rec, nullptr, nullptr);
+      float dbits =
+          DeltaAcBits(z, old_q, new_q, prev_nz, next_nz, next_size, prices);
+      if (nd + lam_bits * dbits < cur_dist - 1e-2f) {
+        best_cand[z] = new_q;
+        memcpy(cur_rec, try_rec, DCTSIZE2 * sizeof(float));
+        cur_dist = nd;
+      }
+    }
+  }
+  memcpy(cblock, best_cand, DCTSIZE2 * sizeof(int16_t));
+}
+
 // Spatial-domain masked & clipped coordinate-descent R-D refinement for
 // sharp text / graphic / clipped-boundary blocks.
 // Minimizes: sum_{i=0..63} W[i] * (clip(rec[i]) - orig[i])^2 + lambda_z * bits
@@ -1147,13 +1512,15 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
         int16_t* cblock = &blocks[0][bx][0];
         const size_t bidx = static_cast<size_t>(by) * w_blk_c + bx;
 
-        // Look up pixel-domain text/sharp-graphic confidence and clip flags.
+        // Look up pixel-domain text/sharp-graphic confidence, smooth-edge, and clip flags.
         float text_score = 0.0f;
         bool has_clip = false;
+        bool has_smooth_edge = false;
         if (m->text_block_map[c] != nullptr) {
           uint8_t flags = m->text_block_map[c][bidx];
           has_clip = ((flags & 0x80) != 0);
-          text_score = static_cast<float>(flags & 0x7F) * (1.0f / 127.0f);
+          has_smooth_edge = ((flags & 0x40) != 0);
+          text_score = static_cast<float>(flags & 0x3F) * (1.0f / 63.0f);
         }
         if (!is_luma && m->text_block_map[0] != nullptr) {
           const jpeg_component_info* ycomp = &cinfo->comp_info[0];
@@ -1164,27 +1531,32 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
             for (size_t dx = 0; dx < h_factor; ++dx) {
               size_t ybx =
                   std::min<size_t>(bx * h_factor + dx, ycomp->width_in_blocks - 1);
-              uint8_t yts =
-                  m->text_block_map[0][yby * ycomp->width_in_blocks + ybx] & 0x7F;
+              uint8_t yflags =
+                  m->text_block_map[0][yby * ycomp->width_in_blocks + ybx];
+              if ((yflags & 0x40) != 0) has_smooth_edge = true;
+              uint8_t yts = yflags & 0x3F;
               if (yts > max_yts) max_yts = yts;
             }
           }
           text_score = std::max(text_score,
-                                static_cast<float>(max_yts) * (1.0f / 127.0f));
+                                static_cast<float>(max_yts) * (1.0f / 63.0f));
         }
 
         const bool is_smooth_grad =
             (!block_is_smooth.empty() && block_is_smooth[bidx] != 0 &&
              text_score <= 0.05f);
         const bool do_spatial_refine =
-            (text_score > 0.05f || (is_luma && has_clip));
+            m->spatial_refine && (text_score > 0.05f || (is_luma && has_clip));
+        const bool do_dering_refine =
+            m->spatial_refine && !do_spatial_refine && has_smooth_edge;
         // Apply causal seam-continuity refinement on smooth Chroma gradients
         // (where quantization steps are coarser and 8x8 hue blocking appears)
         // while keeping Luma drift-free on natural photography.
         const bool do_seam_refine =
-            (!is_luma && !do_spatial_refine && is_smooth_grad);
+            m->spatial_refine && !is_luma && !do_spatial_refine &&
+            !do_dering_refine && is_smooth_grad;
         int16_t raw_cblock[DCTSIZE2];
-        if (do_spatial_refine || do_seam_refine) {
+        if (do_spatial_refine || do_dering_refine || do_seam_refine) {
           memcpy(raw_cblock, cblock, DCTSIZE2 * sizeof(int16_t));
         }
 
@@ -1238,6 +1610,19 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
                                  prices[tbl], weights,
                                  base_lambda * lambda_scale, text_score,
                                  is_luma, has_clip);
+        }
+        if (do_dering_refine) {
+          // Automatically scale deringing strength with target Butteraugli
+          // distance: gentle at Q90 (d<=1.0 -> 0.25) to preserve crisp photo
+          // corners, ramping up smoothly toward 0.85 at coarse low qualities.
+          const float auto_dering =
+              Clamp(0.25f + 0.12f * std::max(0.0f, distance - 1.0f), 0.25f, 0.85f);
+          RefineGradientEdgeRinging(raw_cblock, cblock, qmc, qtable->quantval,
+                                    prices[tbl], weights,
+                                    base_lambda * lambda_scale, dc_only_penalty,
+                                    auto_dering, is_luma);
+        }
+        if (do_spatial_refine || do_dering_refine) {
           prev_col_valid = false;
         } else if (do_seam_refine) {
           float raw_dct[DCTSIZE2];

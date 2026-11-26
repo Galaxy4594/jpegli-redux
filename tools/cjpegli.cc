@@ -146,6 +146,16 @@ struct Args {
         &settings.trellis_lambda, &ParseFloat, 1);
 
     cmdline->AddOptionFlag(
+        '\0', "spatial_refine",
+        "Enable AQ3 spatial text/gradient/edge refinement (default: on in AQ3).",
+        &settings.spatial_refine, &SetBooleanTrue, 1);
+
+    cmdline->AddOptionFlag(
+        '\0', "nospatial_refine",
+        "Disable AQ3 spatial refinement passes (faster AQ3).",
+        &settings.spatial_refine, &SetBooleanFalse, 1);
+
+    cmdline->AddOptionFlag(
         '\0', "std_quant",
         "Use quantization tables based on Annex K of the JPEG standard.",
         &settings.use_std_quant_tables, &SetBooleanTrue, 1);

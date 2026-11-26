@@ -477,12 +477,14 @@ JPEGLI_INLINE uint8_t ComputeTextBlockFlags(const float* JPEGLI_RESTRICT pixels,
     if (has_w || has_b) clip_flag = 0x80;
   }
   const float range = vmax - vmin;
-  const float min_range = is_luma ? 60.0f : 36.0f;
-  if (range <= min_range) return clip_flag;
+  const float min_edge_range = is_luma ? 32.0f : 22.0f;
+  if (range <= min_edge_range) return clip_flag;
 
   const float flat_eps = is_luma ? 2.5f : 2.0f;
+  const float lap_eps = is_luma ? 3.5f : 2.5f;
   int h_flat = 0;
   int v_flat = 0;
+  int smooth_lap = 0;
   float max_jump = 0.0f;
   for (int y = 0; y < 8; ++y) {
     const float* row = pixels + y * stride;
@@ -501,12 +503,33 @@ JPEGLI_INLINE uint8_t ComputeTextBlockFlags(const float* JPEGLI_RESTRICT pixels,
       if (d > max_jump) max_jump = d;
     }
   }
+  // 2nd-derivative (Laplacian) smoothness catches both flat areas and smooth
+  // sloping gradients meeting a sharp edge or corner inside the 8x8 block.
+  for (int y = 0; y < 8; ++y) {
+    const float* rm = pixels + (y > 0 ? y - 1 : 0) * stride;
+    const float* r0 = pixels + y * stride;
+    const float* rp = pixels + (y < 7 ? y + 1 : 7) * stride;
+    for (int x = 0; x < 8; ++x) {
+      float v = r0[x];
+      float lh = (x > 0 && x < 7) ? std::abs(r0[x - 1] - 2.0f * v + r0[x + 1])
+                                  : 0.0f;
+      float lv = (y > 0 && y < 7) ? std::abs(rm[x] - 2.0f * v + rp[x]) : 0.0f;
+      if (lh <= lap_eps && lv <= lap_eps) ++smooth_lap;
+    }
+  }
+  const float min_edge_jump = is_luma ? 24.0f : 16.0f;
+  uint8_t smooth_edge_flag =
+      (smooth_lap >= 36 && smooth_lap < 60 && max_jump >= min_edge_jump) ? 0x40
+                                                                         : 0;
+
+  const float min_range = is_luma ? 60.0f : 36.0f;
   const int flat_pairs = h_flat + v_flat;
   const int min_dir_flat = std::min(h_flat, v_flat);
   const float min_jump = is_luma ? 48.0f : 28.0f;
   const int min_flat = is_luma ? 38 : 42;
-  if (max_jump <= min_jump || flat_pairs <= min_flat || min_dir_flat < 14) {
-    return clip_flag;
+  if (range <= min_range || max_jump <= min_jump || flat_pairs <= min_flat ||
+      min_dir_flat < 14) {
+    return static_cast<uint8_t>(clip_flag | smooth_edge_flag);
   }
 
   float r_s = std::min(1.0f, (range - min_range) / (is_luma ? 60.0f : 40.0f));
@@ -514,8 +537,8 @@ JPEGLI_INLINE uint8_t ComputeTextBlockFlags(const float* JPEGLI_RESTRICT pixels,
   float f_s = std::min(1.0f, static_cast<float>(flat_pairs - min_flat) / 24.0f);
   float d_s = std::min(1.0f, static_cast<float>(min_dir_flat - 13) / 10.0f);
   float score = r_s * j_s * f_s * d_s;
-  uint8_t s7 = static_cast<uint8_t>(std::round(score * 127.0f));
-  return static_cast<uint8_t>(clip_flag | (s7 & 0x7F));
+  uint8_t s6 = static_cast<uint8_t>(std::round(score * 63.0f));
+  return static_cast<uint8_t>(clip_flag | smooth_edge_flag | (s6 & 0x3F));
 }
 
 template <typename T>

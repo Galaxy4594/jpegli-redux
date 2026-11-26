@@ -173,6 +173,9 @@ void jpegli_enable_wasserstein_quant(j_compress_ptr cinfo, boolean value);
 // AC symbol bit lengths.
 void jpegli_enable_trellis_rdoq(j_compress_ptr cinfo, boolean value);
 
+// Enables spatial text/gradient/edge refinement passes in AQ3 (default: true).
+void jpegli_enable_spatial_refine(j_compress_ptr cinfo, boolean value);
+
 // Sets the rate-distortion lambda for trellis RDOQ (negative = auto default).
 void jpegli_set_trellis_lambda(j_compress_ptr cinfo, float lambda);
 
