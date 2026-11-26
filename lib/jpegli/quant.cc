@@ -776,7 +776,11 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
           if (!is_yuv420) {
             base_val *= 0.78f;
           }
-          float luma_cap = 3.8f * base_quant_matrix[0][k];
+          // Cap extreme Nelder-Mead spikes relative to the effective luma step
+          // (accounting for k420Rescale in 4:2:0 so the small 0.055-0.080
+          // rescale entries at u+v >= 12 are not double-reduced into a HF dip).
+          float rescale = is_yuv420 ? k420Rescale[k] : 1.0f;
+          float luma_cap = (3.8f * base_quant_matrix[0][k]) / rescale;
           base_val = std::min(base_val, luma_cap);
         }
         // At low quality (distance > 4.5, e.g. low-bitrate target_size or Q<50),
