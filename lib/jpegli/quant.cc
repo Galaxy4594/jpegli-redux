@@ -779,6 +779,34 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
           float luma_cap = 3.8f * base_quant_matrix[0][k];
           base_val = std::min(base_val, luma_cap);
         }
+        // At low quality (distance > 4.5, e.g. low-bitrate target_size or Q<50),
+        // smoothly shift trellis_rdoq's DQT budget away from coarse HF noise
+        // toward DC and linear gradient slopes (u+v <= 1) while keeping the
+        // mid-frequency CSF passband (2 <= u+v <= 5) intact.
+        if (m->trellis_rdoq) {
+          float lq = std::max(
+              0.0f, std::min(1.0f, (distances[quant_idx] - 4.5f) / 6.0f));
+          if (lq > 0.0f) {
+            if (quant_idx == 0) {
+              if (uv == 0) {
+                base_val *= (1.0f - 0.10f * lq);
+              } else if (uv == 1) {
+                base_val *= (1.0f - 0.20f * lq);
+              } else if (uv >= 6) {
+                base_val *= (1.0f + 0.12f * lq);
+              }
+            } else {
+              if (uv == 0) {
+                base_val *= (1.0f - 0.10f * lq);
+              } else if (uv == 1) {
+                base_val *= (1.0f - 0.18f * lq);
+              } else if (uv >= 5 && is_yuv420) {
+                base_val *=
+                    (1.0f + 0.08f * lq * static_cast<float>(uv - 4));
+              }
+            }
+          }
+        }
       }
       int qval = std::round(scale * base_val);
       (*qtable)->quantval[k] = std::max(1, std::min(qval, quant_max));
