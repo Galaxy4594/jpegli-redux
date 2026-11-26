@@ -202,6 +202,10 @@ void ProcessiMCURow(j_compress_ptr cinfo) {
             aq_strength = qf[iy * qf_stride + bx * h_factor];
           }
           const float* pixels = imcu_start[c] + (iy * stride + bx) * DCTSIZE;
+          if (pass1_raw && m->text_block_map[c] != nullptr) {
+            m->text_block_map[c][by * comp->width_in_blocks + bx] =
+                ComputeTextBlockFlags(pixels, stride, c == 0);
+          }
           ComputeCoefficientBlock(pixels, stride, qmc, last_dc_coeff[c],
                                   aq_strength, zero_bias_offset, zero_bias_mul,
                                   pass1_raw ? false : m->energy_based_rdoq,

@@ -350,10 +350,11 @@ void QuantizeBlock(const float* dct, const float* qmc, float aq_strength,
 }
 
 
-// White-pixel clip continuation for Luma blocks containing saturated white
-// (Y >= 254.5) next to non-white content. Since decoders clamp reconstructed
-// samples to [0, 255], allowing white pixels to overshoot slightly reduces
-// ringing and bit cost around high-contrast edges for zero visible error.
+// Clipped-boundary (pure white Y >= 254.5 and pure black Y <= 0.5) POCS
+// continuation for Luma blocks containing saturated white/black next to
+// contrasting content. Since decoders clamp reconstructed samples to [0, 255],
+// allowing clipped pixels to overshoot/undershoot absorbs Gibbs ringing and
+// suppresses salt-and-pepper / chroma speckles on text and sharp graphics.
 JPEGLI_INLINE void ContinueWhiteClipLuma(const float* JPEGLI_RESTRICT pixels,
                                          size_t stride,
                                          const float* JPEGLI_RESTRICT qmc,
@@ -378,22 +379,32 @@ JPEGLI_INLINE void ContinueWhiteClipLuma(const float* JPEGLI_RESTRICT pixels,
     return;
   }
   int white_count = 0;
+  float vmin = 255.0f;
   HWY_ALIGN float target[64];
-  bool is_white[64];
+  uint8_t clip_type[64];  // 0 = normal, 1 = pure white
   for (int y = 0; y < 8; ++y) {
     const float* row = pixels + y * stride;
     for (int x = 0; x < 8; ++x) {
       float v = row[x];
       target[y * 8 + x] = v;
-      bool w = (v >= 254.5f);
-      is_white[y * 8 + x] = w;
-      white_count += w ? 1 : 0;
+      if (v < vmin) vmin = v;
+      if (v >= 254.5f) {
+        clip_type[y * 8 + x] = 1;
+        white_count++;
+      } else {
+        clip_type[y * 8 + x] = 0;
+      }
     }
   }
-  if (white_count < 2 || white_count == 64) {
+  const bool use_white = (white_count >= 2 && white_count < 64 && vmin <= 235.0f);
+  if (!use_white) {
     TransformFromPixels(pixels, stride, dct, scratch_space);
     return;
   }
+  // Cap overshoot proportionally to the quantization step so high-Q blocks
+  // never risk DC overflow while mid/low-Q blocks absorb full ringing.
+  const float step_ref = 8.0f / std::max(0.01f, qmc[9]);
+  const float max_white = 255.0f + std::min(125.0f, 5.0f * step_ref);
   static constexpr float kIdctBasis[8][8] = {
       {1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f},
       {1.387039f,  1.175876f,  0.785695f,  0.275899f, -0.275899f, -0.785695f, -1.175876f, -1.387039f},
@@ -423,18 +434,88 @@ JPEGLI_INLINE void ContinueWhiteClipLuma(const float* JPEGLI_RESTRICT pixels,
     }
     for (int y = 0; y < 8; ++y) {
       for (int x = 0; x < 8; ++x) {
-        if (!is_white[y * 8 + x]) continue;
+        if (clip_type[y * 8 + x] != 1) continue;
         float sum = 0.0f;
         for (int v = 0; v < 8; ++v) {
           sum += tmp_row[v * 8 + x] * kIdctBasis[v][y];
         }
         if (sum > target[y * 8 + x]) {
-          target[y * 8 + x] = std::min(sum, 380.0f);
+          target[y * 8 + x] = std::min(sum, max_white);
         }
       }
     }
   }
   TransformFromPixels(target, 8, dct, scratch_space);
+}
+
+// Pixel-domain detector for sharp text / UI / graphic edges sitting on flat
+// backgrounds (high dynamic range + sharp 1-pixel step + flat neighbor pairs
+// in both directions). Bits 0..6 store text confidence (0..127); bit 7 (0x80)
+// marks Luma blocks with clipped pure-white/pure-black boundaries.
+JPEGLI_INLINE uint8_t ComputeTextBlockFlags(const float* JPEGLI_RESTRICT pixels,
+                                            size_t stride, bool is_luma) {
+  float vmin = pixels[0];
+  float vmax = pixels[0];
+  int white_count = 0;
+  int black_count = 0;
+  for (int y = 0; y < 8; ++y) {
+    const float* row = pixels + y * stride;
+    for (int x = 0; x < 8; ++x) {
+      float v = row[x];
+      if (v < vmin) vmin = v;
+      if (v > vmax) vmax = v;
+      if (is_luma) {
+        if (v >= 254.5f) ++white_count;
+        else if (v <= 0.5f) ++black_count;
+      }
+    }
+  }
+  uint8_t clip_flag = 0;
+  if (is_luma) {
+    bool has_w = (white_count >= 2 && white_count < 64 && vmin <= 235.0f);
+    bool has_b = (black_count >= 8 && black_count < 64 && vmax >= 48.0f);
+    if (has_w || has_b) clip_flag = 0x80;
+  }
+  const float range = vmax - vmin;
+  const float min_range = is_luma ? 60.0f : 36.0f;
+  if (range <= min_range) return clip_flag;
+
+  const float flat_eps = is_luma ? 2.5f : 2.0f;
+  int h_flat = 0;
+  int v_flat = 0;
+  float max_jump = 0.0f;
+  for (int y = 0; y < 8; ++y) {
+    const float* row = pixels + y * stride;
+    for (int x = 0; x < 7; ++x) {
+      float d = std::abs(row[x + 1] - row[x]);
+      if (d <= flat_eps) ++h_flat;
+      if (d > max_jump) max_jump = d;
+    }
+  }
+  for (int y = 0; y < 7; ++y) {
+    const float* r0 = pixels + y * stride;
+    const float* r1 = pixels + (y + 1) * stride;
+    for (int x = 0; x < 8; ++x) {
+      float d = std::abs(r1[x] - r0[x]);
+      if (d <= flat_eps) ++v_flat;
+      if (d > max_jump) max_jump = d;
+    }
+  }
+  const int flat_pairs = h_flat + v_flat;
+  const int min_dir_flat = std::min(h_flat, v_flat);
+  const float min_jump = is_luma ? 48.0f : 28.0f;
+  const int min_flat = is_luma ? 38 : 42;
+  if (max_jump <= min_jump || flat_pairs <= min_flat || min_dir_flat < 14) {
+    return clip_flag;
+  }
+
+  float r_s = std::min(1.0f, (range - min_range) / (is_luma ? 60.0f : 40.0f));
+  float j_s = std::min(1.0f, (max_jump - min_jump) / (is_luma ? 48.0f : 36.0f));
+  float f_s = std::min(1.0f, static_cast<float>(flat_pairs - min_flat) / 24.0f);
+  float d_s = std::min(1.0f, static_cast<float>(min_dir_flat - 13) / 10.0f);
+  float score = r_s * j_s * f_s * d_s;
+  uint8_t s7 = static_cast<uint8_t>(std::round(score * 127.0f));
+  return static_cast<uint8_t>(clip_flag | (s7 & 0x7F));
 }
 
 template <typename T>

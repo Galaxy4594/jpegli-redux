@@ -492,6 +492,259 @@ void TrellisQuantizeBlock(int16_t* cblock, const float* qmc,
   }
 }
 
+// Separable 8x8 IDCT basis matching TransformFromPixels in dct-inl.h.
+static constexpr float kSpatialIdctBasis[8][8] = {
+    {1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f,  1.000000f},
+    {1.387039f,  1.175876f,  0.785695f,  0.275899f, -0.275899f, -0.785695f, -1.175876f, -1.387039f},
+    {1.306563f,  0.541196f, -0.541196f, -1.306563f, -1.306563f, -0.541196f,  0.541196f,  1.306563f},
+    {1.175876f, -0.275899f, -1.387039f, -0.785695f,  0.785695f,  1.387039f,  0.275899f, -1.175876f},
+    {1.000000f, -1.000000f, -1.000000f,  1.000000f,  1.000000f, -1.000000f, -1.000000f,  1.000000f},
+    {0.785695f, -1.387039f,  0.275899f,  1.175876f, -1.175876f, -0.275899f,  1.387039f, -0.785695f},
+    {0.541196f, -1.306563f,  1.306563f, -0.541196f, -0.541196f,  1.306563f, -1.306563f,  0.541196f},
+    {0.275899f, -0.785695f,  1.175876f, -1.387039f,  1.387039f, -1.175876f,  0.785695f, -0.275899f},
+};
+
+struct SpatialBasisTable {
+  // basis2d[z][y*8 + x] for zigzag index z = 0..63.
+  float basis[DCTSIZE2][DCTSIZE2];
+  SpatialBasisTable() {
+    for (int z = 0; z < DCTSIZE2; ++z) {
+      int k = kJPEGNaturalOrder[z];
+      int v = k >> 3;
+      int u = k & 7;
+      for (int y = 0; y < 8; ++y) {
+        float bv = kSpatialIdctBasis[v][y];
+        for (int x = 0; x < 8; ++x) {
+          basis[z][y * 8 + x] = bv * kSpatialIdctBasis[u][x];
+        }
+      }
+    }
+  }
+};
+
+const SpatialBasisTable& GetSpatialBasis() {
+  static const SpatialBasisTable kTable;
+  return kTable;
+}
+
+void SeparableIdctFromNatural(const float* dct, float* pixels) {
+  float tmp[DCTSIZE2];
+  for (int v = 0; v < 8; ++v) {
+    for (int x = 0; x < 8; ++x) {
+      float sum = 0.0f;
+      for (int u = 0; u < 8; ++u) {
+        sum += dct[v * 8 + u] * kSpatialIdctBasis[u][x];
+      }
+      tmp[v * 8 + x] = sum;
+    }
+  }
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 8; ++x) {
+      float sum = 0.0f;
+      for (int v = 0; v < 8; ++v) {
+        sum += tmp[v * 8 + x] * kSpatialIdctBasis[v][y];
+      }
+      pixels[y * 8 + x] = sum;
+    }
+  }
+}
+
+// O(1) exact AC Huffman bit delta for changing cblock[z] from old_q to new_q,
+// given the nearest nonzero neighbors prev_nz (< z, or 0) and next_nz (> z, or 64).
+JPEGLI_INLINE float DeltaAcBits(int z, int old_q, int new_q, int prev_nz,
+                                int next_nz, int next_size,
+                                const AcPrices& prices) {
+  auto seg_bits = [&](int qv) -> float {
+    if (qv != 0) {
+      float b = prices.Nonzero(z - prev_nz - 1, SizeOfLevel(std::abs(qv)));
+      if (next_nz < 64) {
+        b += prices.Nonzero(next_nz - z - 1, next_size);
+      } else if (z < 63) {
+        b += prices.Eob();
+      }
+      return b;
+    } else {
+      if (next_nz < 64) {
+        return prices.Nonzero(next_nz - prev_nz - 1, next_size);
+      } else if (prev_nz < 63) {
+        return prices.Eob();
+      }
+      return 0.0f;
+    }
+  };
+  return seg_bits(new_q) - seg_bits(old_q);
+}
+
+// Spatial-domain masked & clipped coordinate-descent R-D refinement for
+// sharp text / graphic / clipped-boundary blocks.
+// Minimizes: sum_{i=0..63} W[i] * (clip(rec[i]) - orig[i])^2 + lambda_z * bits
+// where lambda_z = trellis_lambda * (Q[k]^2 / weights[z]) * avg_w matches
+// Parseval's exact scaling at every frequency, and flat background pixels next
+// to sharp text strokes receive elevated weight W_bg so mosquito noise, chroma
+// speckles, and salt-and-pepper are suppressed cleanly without blurring text.
+void RefineTextBlockSpatial(const int16_t* raw_cblock, int16_t* cblock,
+                            const UINT16* quantval, const AcPrices& prices,
+                            const float* weights, float trellis_lambda,
+                            float text_score, bool is_luma, bool has_clip) {
+  const SpatialBasisTable& tbl = GetSpatialBasis();
+
+  // Reconstruct original pixels (1/128 accuracy) and current quantized recon.
+  float raw_dct[DCTSIZE2];
+  float cur_dct[DCTSIZE2];
+  raw_dct[0] = 128.0f + static_cast<float>(raw_cblock[0]) * (1.0f / 128.0f);
+  cur_dct[0] =
+      128.0f + static_cast<float>(cblock[0]) * (static_cast<float>(quantval[0]) * 0.125f);
+  for (int z = 1; z < DCTSIZE2; ++z) {
+    int k = kJPEGNaturalOrder[z];
+    raw_dct[k] = static_cast<float>(raw_cblock[z]) * (1.0f / 128.0f);
+    cur_dct[k] =
+        static_cast<float>(cblock[z]) * (static_cast<float>(quantval[k]) * 0.125f);
+  }
+  HWY_ALIGN float orig[DCTSIZE2];
+  HWY_ALIGN float rec[DCTSIZE2];
+  SeparableIdctFromNatural(raw_dct, orig);
+  SeparableIdctFromNatural(cur_dct, rec);
+
+  if (is_luma) {
+    for (int i = 0; i < DCTSIZE2; ++i) {
+      orig[i] = Clamp(orig[i], 0.0f, 255.0f);
+    }
+  }
+
+  // Build per-pixel spatial masking weights: flat background pixels in text
+  // blocks get elevated weight W_bg so ringing on clean backgrounds is penalized
+  // much more heavily than minor stroke softening.
+  HWY_ALIGN float W[DCTSIZE2];
+  const float eps = is_luma ? 2.5f : 2.0f;
+  const float w_bg_max = is_luma ? 2.5f : 3.5f;
+  const float w_bg = 1.0f + text_score * (w_bg_max - 1.0f);
+  float sum_w = 0.0f;
+  for (int y = 0; y < 8; ++y) {
+    for (int x = 0; x < 8; ++x) {
+      int i = y * 8 + x;
+      float v = orig[i];
+      bool flat = true;
+      if (x > 0 && std::abs(orig[i - 1] - v) > eps) flat = false;
+      if (flat && x < 7 && std::abs(orig[i + 1] - v) > eps) flat = false;
+      if (flat && y > 0 && std::abs(orig[i - 8] - v) > eps) flat = false;
+      if (flat && y < 7 && std::abs(orig[i + 8] - v) > eps) flat = false;
+      float wi = flat ? w_bg : 1.0f;
+      W[i] = wi;
+      sum_w += wi;
+    }
+  }
+  const float avg_w = sum_w * (1.0f / 64.0f);
+  const bool use_clip = is_luma && (has_clip || text_score > 0.0f);
+
+  auto eval_dist_delta = [&](const float* b, float delta) -> float {
+    float d = 0.0f;
+    if (use_clip) {
+      for (int i = 0; i < DCTSIZE2; ++i) {
+        float rv = rec[i] + delta * b[i];
+        rv = rv < 0.0f ? 0.0f : (rv > 255.0f ? 255.0f : rv);
+        float e = rv - orig[i];
+        d += W[i] * e * e;
+      }
+    } else {
+      for (int i = 0; i < DCTSIZE2; ++i) {
+        float e = (rec[i] + delta * b[i]) - orig[i];
+        d += W[i] * e * e;
+      }
+    }
+    return d;
+  };
+
+  float cur_dist = eval_dist_delta(tbl.basis[0], 0.0f);
+
+  // Precompute ideal unquantized levels in zigzag order to skip irrelevant HF.
+  float ideal_abs[DCTSIZE2];
+  for (int z = 0; z < DCTSIZE2; ++z) {
+    int k = kJPEGNaturalOrder[z];
+    ideal_abs[z] = std::abs(static_cast<float>(raw_cblock[z])) /
+                   (16.0f * static_cast<float>(quantval[k]));
+  }
+
+  const int max_iters = (text_score > 0.25f) ? 2 : 1;
+  for (int iter = 0; iter < max_iters; ++iter) {
+    bool changed = false;
+    for (int z = 0; z < DCTSIZE2; ++z) {
+      int16_t old_q = cblock[z];
+      if (z > 20 && old_q == 0 && ideal_abs[z] < 0.35f) continue;
+
+      int k = kJPEGNaturalOrder[z];
+      const float qk = static_cast<float>(quantval[k]);
+      const float step = qk * 0.125f;
+      // Exact Parseval-matched spatial lambda for coefficient z.
+      const float lam_z = trellis_lambda * (qk * qk / weights[z]) * avg_w;
+      const float* b = tbl.basis[z];
+
+      // Locate nearest nonzero neighbors once for O(1) exact bit deltas.
+      int prev_nz = 0;
+      int next_nz = 64;
+      int next_size = 0;
+      if (z > 0) {
+        for (int p = z - 1; p >= 1; --p) {
+          if (cblock[p] != 0) {
+            prev_nz = p;
+            break;
+          }
+        }
+        for (int n = z + 1; n < DCTSIZE2; ++n) {
+          if (cblock[n] != 0) {
+            next_nz = n;
+            next_size = SizeOfLevel(std::abs(static_cast<int>(cblock[n])));
+            break;
+          }
+        }
+      }
+
+      int16_t best_q = old_q;
+      float best_gain = 0.0f;  // positive = improvement (reduction in D + lam*R)
+      float best_dist = cur_dist;
+
+      auto try_val = [&](int32_t new_q_i32) {
+        if (new_q_i32 == old_q) return;
+        if (new_q_i32 < -1023 || new_q_i32 > 1023) return;
+        int16_t new_q = static_cast<int16_t>(new_q_i32);
+        float delta = static_cast<float>(new_q - old_q) * step;
+        float nd = eval_dist_delta(b, delta);
+        float dbits =
+            (z == 0) ? 0.0f
+                     : DeltaAcBits(z, old_q, new_q, prev_nz, next_nz, next_size,
+                                   prices);
+        float gain = (cur_dist - nd) - lam_z * dbits;
+        if (gain > best_gain + 1e-3f) {
+          best_gain = gain;
+          best_q = new_q;
+          best_dist = nd;
+        }
+      };
+
+      try_val(old_q - 1);
+      try_val(old_q + 1);
+      if (z == 0 && has_clip) {
+        try_val(old_q - 2);
+        try_val(old_q + 2);
+        try_val(old_q - 4);
+        try_val(old_q + 4);
+      } else if (z > 0 && std::abs(old_q) >= 2) {
+        try_val(0);
+      }
+
+      if (best_q != old_q) {
+        float delta = static_cast<float>(best_q - old_q) * step;
+        for (int i = 0; i < DCTSIZE2; ++i) {
+          rec[i] += delta * b[i];
+        }
+        cblock[z] = best_q;
+        cur_dist = best_dist;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
 }  // namespace
 
 void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
@@ -607,6 +860,10 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       if (m->wasserstein_quant && is_luma) {
         // Internal Wasserstein / Sobolev H^-1 radial transport distortion metric.
         w *= (0.90f + 0.25f * kTransportW[k]);
+      } else if (m->wasserstein_quant && !is_luma) {
+        // Gentle Sobolev transport rolloff on Chroma to prefer dropping HF
+        // chroma speckles over low-frequency color accuracy.
+        w *= (0.85f + 0.30f * kTransportW[k]);
       }
       weights[z] = w;
     }
@@ -699,6 +956,39 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
         int16_t* cblock = &blocks[0][bx][0];
 
+        // Look up pixel-domain text/sharp-graphic confidence and clip flags.
+        float text_score = 0.0f;
+        bool has_clip = false;
+        if (m->text_block_map[c] != nullptr) {
+          uint8_t flags = m->text_block_map[c][by * comp->width_in_blocks + bx];
+          has_clip = ((flags & 0x80) != 0);
+          text_score = static_cast<float>(flags & 0x7F) * (1.0f / 127.0f);
+        }
+        if (!is_luma && m->text_block_map[0] != nullptr) {
+          const jpeg_component_info* ycomp = &cinfo->comp_info[0];
+          uint8_t max_yts = 0;
+          for (size_t dy = 0; dy < v_factor; ++dy) {
+            size_t yby =
+                std::min<size_t>(by * v_factor + dy, ycomp->height_in_blocks - 1);
+            for (size_t dx = 0; dx < h_factor; ++dx) {
+              size_t ybx =
+                  std::min<size_t>(bx * h_factor + dx, ycomp->width_in_blocks - 1);
+              uint8_t yts =
+                  m->text_block_map[0][yby * ycomp->width_in_blocks + ybx] & 0x7F;
+              if (yts > max_yts) max_yts = yts;
+            }
+          }
+          text_score = std::max(text_score,
+                                static_cast<float>(max_yts) * (1.0f / 127.0f));
+        }
+
+        const bool do_spatial_refine =
+            (text_score > 0.05f || (is_luma && has_clip));
+        int16_t raw_cblock[DCTSIZE2];
+        if (do_spatial_refine) {
+          memcpy(raw_cblock, cblock, DCTSIZE2 * sizeof(int16_t));
+        }
+
         float lambda_scale = 1.0f;
         if (use_aq && !block_ac_energy.empty()) {
           size_t bidx = static_cast<size_t>(by) * comp->width_in_blocks + bx;
@@ -714,6 +1004,14 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
         }
         if (sharpyuv_luma) {
           lambda_scale *= 0.88f;
+        }
+        if (text_score > 0.0f) {
+          // Sharp text/graphics on flat backgrounds have broadband DCT spectra
+          // that mimic noisy texture; prevent AQ from over-quantizing them.
+          float target_ls = is_luma ? 0.85f : 0.95f;
+          if (lambda_scale > target_ls) {
+            lambda_scale += text_score * (target_ls - lambda_scale);
+          }
         }
 
         float dc_only_penalty = 0.0f;
@@ -736,6 +1034,13 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
 
         TrellisQuantizeBlock(cblock, qmc, prices[tbl], weights,
                              base_lambda * lambda_scale, dc_only_penalty);
+
+        if (do_spatial_refine) {
+          RefineTextBlockSpatial(raw_cblock, cblock, qtable->quantval,
+                                 prices[tbl], weights,
+                                 base_lambda * lambda_scale, text_score,
+                                 is_luma, has_clip);
+        }
       }
     }
   }

@@ -509,6 +509,20 @@ void AllocateBuffers(j_compress_ptr cinfo) {
     memset(m->zero_bias_mul[c], 0, DCTSIZE2 * sizeof(float));
     memset(m->zero_bias_offset[c], 0, DCTSIZE2 * sizeof(float));
   }
+  for (int c = 0; c < kMaxComponents; ++c) {
+    m->text_block_map[c] = nullptr;
+  }
+  if (m->trellis_rdoq && cinfo->jpeg_color_space == JCS_YCbCr) {
+    for (int c = 0; c < cinfo->num_components; ++c) {
+      jpeg_component_info* comp = &cinfo->comp_info[c];
+      const size_t nblocks =
+          static_cast<size_t>(comp->width_in_blocks) * comp->height_in_blocks;
+      if (nblocks > 0) {
+        m->text_block_map[c] = Allocate<uint8_t>(cinfo, nblocks, JPOOL_IMAGE);
+        memset(m->text_block_map[c], 0, nblocks);
+      }
+    }
+  }
   if (m->use_sharpyuv) {
     for (int i = 0; i < 7; ++i) {
       m->sharpyuv_workspace[i].Allocate(cinfo, iMCU_height, xsize_full);
