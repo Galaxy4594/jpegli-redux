@@ -732,7 +732,11 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
         int v = k % 8;
         int uv = u + v;
         if (quant_idx == 0) {
-          if ((u == 0 && v == 2) || (u == 2 && v == 0)) {
+          if (uv == 0) {
+            base_val *= 0.90f;
+          } else if (uv == 1) {
+            base_val *= 0.86f;
+          } else if ((u == 0 && v == 2) || (u == 2 && v == 0)) {
             base_val *= 0.65f;
           } else if (u == 1 && v == 1) {
             base_val *= 0.80f;
@@ -753,11 +757,16 @@ void SetQuantMatrices(j_compress_ptr cinfo, float distances[NUM_QUANT_TBLS],
             base_val *= 1.13f;
           }
         } else {
-          // For chroma, protect low-frequency CSF peak (u + v <= 3), cap the
-          // extreme bottom-right corner cliff in kBaseQuantMatrixYCbCr (which
-          // otherwise hits 128..254 at Q90 and causes BA max spikes), and in
-          // 4:4:4 keep Chroma/Luma DQT balanced (~2x) for crisp color edges.
-          if ((u == 0 && v == 2) || (u == 2 && v == 0)) {
+          // For chroma, protect DC and linear gradient slopes (u + v <= 1) as
+          // well as the low-frequency CSF peak (u + v <= 3) to prevent 8x8
+          // chroma blocking on smooth color gradients, cap the extreme
+          // bottom-right corner cliff in kBaseQuantMatrixYCbCr, and in 4:4:4
+          // keep Chroma/Luma DQT balanced (~2x) for crisp color edges.
+          if (uv == 0) {
+            base_val *= 0.78f;
+          } else if (uv == 1) {
+            base_val *= 0.72f;
+          } else if ((u == 0 && v == 2) || (u == 2 && v == 0)) {
             base_val *= 0.78f;
           } else if (uv >= 2 && uv <= 3 && (u <= 1 || v <= 1)) {
             base_val *= 0.85f;

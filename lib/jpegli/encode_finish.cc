@@ -745,6 +745,175 @@ void RefineTextBlockSpatial(const int16_t* raw_cblock, int16_t* cblock,
   }
 }
 
+// Causal inter-block seam-continuity R-D refinement for smooth gradient blocks.
+// Optimizes only the 6 low-frequency gradient coefficients (DC, (0,1), (1,0),
+// (2,0), (1,1), (0,2)) to minimize in-block L2 distortion plus cross-seam
+// discontinuity against already-finalized smooth left/top neighbors, plus
+// Parseval-matched exact AC Huffman bit deltas.
+void RefineGradientSeamBlock(const float* orig, float* rec, int16_t* cblock,
+                             const UINT16* quantval, const AcPrices& prices,
+                             const float* weights, float trellis_lambda,
+                             bool has_left, const float* left_rec,
+                             const float* left_orig, bool has_top,
+                             const float* top_rec, const float* top_orig,
+                             float seam_weight) {
+  // Per-pixel smoothness gate across the left and top 8x8 boundaries so we
+  // never smooth across a true sharp edge aligned with an 8x8 block seam.
+  float wL[8] = {};
+  float wT[8] = {};
+  float targetL[8] = {};
+  float targetT[8] = {};
+  int active_seam = 0;
+  static constexpr float kMaxSeamJump = 14.0f;
+  if (has_left) {
+    for (int y = 0; y < 8; ++y) {
+      float diff = orig[y * 8] - left_orig[y];
+      if (std::abs(diff) <= kMaxSeamJump) {
+        wL[y] = seam_weight;
+        targetL[y] = (0.75f * left_rec[y] + 0.25f * left_orig[y]) + diff;
+        ++active_seam;
+      }
+    }
+  }
+  if (has_top) {
+    for (int x = 0; x < 8; ++x) {
+      float diff = orig[x] - top_orig[x];
+      if (std::abs(diff) <= kMaxSeamJump) {
+        wT[x] = seam_weight;
+        targetT[x] = (0.75f * top_rec[x] + 0.25f * top_orig[x]) + diff;
+        ++active_seam;
+      }
+    }
+  }
+  if (active_seam < 3) return;
+
+  // Only refine blocks with a visible cross-seam discontinuity.
+  float seam_err2 = 0.0f;
+  if (has_left) {
+    for (int y = 0; y < 8; ++y) {
+      if (wL[y] > 0.0f) {
+        float e = rec[y * 8] - targetL[y];
+        seam_err2 += e * e;
+      }
+    }
+  }
+  if (has_top) {
+    for (int x = 0; x < 8; ++x) {
+      if (wT[x] > 0.0f) {
+        float e = rec[x] - targetT[x];
+        seam_err2 += e * e;
+      }
+    }
+  }
+  if (seam_err2 < 0.50f * static_cast<float>(active_seam)) return;
+
+  float orig_mean = 0.0f;
+  for (int i = 0; i < DCTSIZE2; ++i) orig_mean += orig[i];
+  orig_mean *= (1.0f / 64.0f);
+  const float ideal_dc =
+      (orig_mean - 128.0f) * (8.0f / static_cast<float>(quantval[0]));
+
+  const SpatialBasisTable& tbl = GetSpatialBasis();
+  const float avg_w =
+      1.0f + (static_cast<float>(active_seam) * seam_weight) * (1.0f / 64.0f);
+
+  auto eval_dist_delta = [&](const float* b, float delta) -> float {
+    float d = 0.0f;
+    for (int i = 0; i < DCTSIZE2; ++i) {
+      float e = (rec[i] + delta * b[i]) - orig[i];
+      d += e * e;
+    }
+    if (has_left) {
+      for (int y = 0; y < 8; ++y) {
+        if (wL[y] > 0.0f) {
+          float e = (rec[y * 8] + delta * b[y * 8]) - targetL[y];
+          d += wL[y] * e * e;
+        }
+      }
+    }
+    if (has_top) {
+      for (int x = 0; x < 8; ++x) {
+        if (wT[x] > 0.0f) {
+          float e = (rec[x] + delta * b[x]) - targetT[x];
+          d += wT[x] * e * e;
+        }
+      }
+    }
+    return d;
+  };
+
+  float cur_dist = eval_dist_delta(tbl.basis[0], 0.0f);
+
+  for (int iter = 0; iter < 2; ++iter) {
+    bool changed = false;
+    for (int z = 0; z < 6; ++z) {
+      int16_t old_q = cblock[z];
+      int k = kJPEGNaturalOrder[z];
+      const float qk = static_cast<float>(quantval[k]);
+      const float step = qk * 0.125f;
+      const float lam_z = trellis_lambda * (qk * qk / weights[z]) * avg_w;
+      const float* b = tbl.basis[z];
+
+      int prev_nz = 0;
+      int next_nz = 64;
+      int next_size = 0;
+      if (z > 0) {
+        for (int p = z - 1; p >= 1; --p) {
+          if (cblock[p] != 0) {
+            prev_nz = p;
+            break;
+          }
+        }
+        for (int n = z + 1; n < DCTSIZE2; ++n) {
+          if (cblock[n] != 0) {
+            next_nz = n;
+            next_size = SizeOfLevel(std::abs(static_cast<int>(cblock[n])));
+            break;
+          }
+        }
+      }
+
+      int16_t best_q = old_q;
+      float best_gain = 0.0f;
+      float best_dist = cur_dist;
+
+      for (int delta_q : {-1, 1}) {
+        int32_t new_q_i32 = static_cast<int32_t>(old_q) + delta_q;
+        if (new_q_i32 < -1023 || new_q_i32 > 1023) continue;
+        // Bound DC adjustment near the half-step rounding boundary to guarantee
+        // zero macro-scale drift across smooth gradients.
+        if (z == 0 && std::abs(static_cast<float>(new_q_i32) - ideal_dc) > 0.82f) {
+          continue;
+        }
+        int16_t new_q = static_cast<int16_t>(new_q_i32);
+        float delta = static_cast<float>(delta_q) * step;
+        float nd = eval_dist_delta(b, delta);
+        float dbits =
+            (z == 0) ? 0.0f
+                     : DeltaAcBits(z, old_q, new_q, prev_nz, next_nz, next_size,
+                                   prices);
+        float gain = (cur_dist - nd) - lam_z * dbits;
+        if (gain > best_gain + 1e-3f) {
+          best_gain = gain;
+          best_q = new_q;
+          best_dist = nd;
+        }
+      }
+
+      if (best_q != old_q) {
+        float delta = static_cast<float>(best_q - old_q) * step;
+        for (int i = 0; i < DCTSIZE2; ++i) {
+          rec[i] += delta * b[i];
+        }
+        cblock[z] = best_q;
+        cur_dist = best_dist;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
 }  // namespace
 
 void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
@@ -877,6 +1046,7 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
         static_cast<size_t>(comp->height_in_blocks) * comp->width_in_blocks;
     std::vector<float> block_ac_energy;
     std::vector<float> block_raw_mask;
+    std::vector<uint8_t> block_is_smooth(num_blocks, 0);
     float median_mask = 1.0f;
     if (use_aq && num_blocks > 0) {
       block_ac_energy.resize(num_blocks);
@@ -892,12 +1062,14 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
         for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
           const int16_t* cblock = &blocks[0][bx][0];
           float ac_energy = 0.0f;
+          float hf_energy = 0.0f;
           float peak_energy = 0.0f;
           float diag_energy = 0.0f;
           for (int z = 1; z < DCTSIZE2; ++z) {
             float v = static_cast<float>(cblock[z]) * kInvQ4Scale;
             float e = v * v;
             ac_energy += e;
+            if (z >= 6) hf_energy += e;
             if (e > peak_energy) peak_energy = e;
             int k = kJPEGNaturalOrder[z];
             if ((k >> 3) >= 2 && (k & 7) >= 2) {
@@ -914,6 +1086,11 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
           size_t bidx = static_cast<size_t>(by) * comp->width_in_blocks + bx;
           block_ac_energy[bidx] = ac_energy;
           block_raw_mask[bidx] = raw_mask;
+          // Smooth flat or pure low-frequency gradient block (negligible HF
+          // energy beyond the 5 lowest linear/quadratic basis functions).
+          if (ac_energy < 1.0f || (hf_energy < 1.5f && ac_energy < 150.0f)) {
+            block_is_smooth[bidx] = 1;
+          }
         }
       }
       if (comp->width_in_blocks >= 2 && comp->height_in_blocks >= 2) {
@@ -951,16 +1128,30 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
       }
     }
 
+    // 1-row causal seam buffers for smooth gradient continuity refinement.
+    const size_t w_blk_c = comp->width_in_blocks;
+    std::vector<float> prev_row_rec_bot(w_blk_c * 8, 0.0f);
+    std::vector<float> prev_row_orig_bot(w_blk_c * 8, 0.0f);
+    std::vector<uint8_t> prev_row_valid(w_blk_c, 0);
+    std::vector<float> cur_row_rec_bot(w_blk_c * 8, 0.0f);
+    std::vector<float> cur_row_orig_bot(w_blk_c * 8, 0.0f);
+    std::vector<uint8_t> cur_row_valid(w_blk_c, 0);
+
     for (JDIMENSION by = 0; by < comp->height_in_blocks; ++by) {
       JBLOCKARRAY blocks = GetBlockRow(cinfo, c, by);
+      float prev_col_rec_right[8] = {};
+      float prev_col_orig_right[8] = {};
+      bool prev_col_valid = false;
+      std::fill(cur_row_valid.begin(), cur_row_valid.end(), 0);
       for (JDIMENSION bx = 0; bx < comp->width_in_blocks; ++bx) {
         int16_t* cblock = &blocks[0][bx][0];
+        const size_t bidx = static_cast<size_t>(by) * w_blk_c + bx;
 
         // Look up pixel-domain text/sharp-graphic confidence and clip flags.
         float text_score = 0.0f;
         bool has_clip = false;
         if (m->text_block_map[c] != nullptr) {
-          uint8_t flags = m->text_block_map[c][by * comp->width_in_blocks + bx];
+          uint8_t flags = m->text_block_map[c][bidx];
           has_clip = ((flags & 0x80) != 0);
           text_score = static_cast<float>(flags & 0x7F) * (1.0f / 127.0f);
         }
@@ -982,17 +1173,24 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
                                 static_cast<float>(max_yts) * (1.0f / 127.0f));
         }
 
+        const bool is_smooth_grad =
+            (!block_is_smooth.empty() && block_is_smooth[bidx] != 0 &&
+             text_score <= 0.05f);
         const bool do_spatial_refine =
             (text_score > 0.05f || (is_luma && has_clip));
+        // Apply causal seam-continuity refinement on smooth Chroma gradients
+        // (where quantization steps are coarser and 8x8 hue blocking appears)
+        // while keeping Luma drift-free on natural photography.
+        const bool do_seam_refine =
+            (!is_luma && !do_spatial_refine && is_smooth_grad);
         int16_t raw_cblock[DCTSIZE2];
-        if (do_spatial_refine) {
+        if (do_spatial_refine || do_seam_refine) {
           memcpy(raw_cblock, cblock, DCTSIZE2 * sizeof(int16_t));
         }
 
         float lambda_scale = 1.0f;
         if (use_aq && !block_ac_energy.empty()) {
-          size_t bidx = static_cast<size_t>(by) * comp->width_in_blocks + bx;
-          if (block_ac_energy[bidx] < 1.0f) {
+          if (block_ac_energy[bidx] < 1.0f || is_smooth_grad) {
             // Smooth / flat gradient block: protect strongly against banding.
             lambda_scale *= 0.45f;
           } else {
@@ -1040,8 +1238,52 @@ void TrellisQuantizeCoeffs(j_compress_ptr cinfo) {
                                  prices[tbl], weights,
                                  base_lambda * lambda_scale, text_score,
                                  is_luma, has_clip);
+          prev_col_valid = false;
+        } else if (do_seam_refine) {
+          float raw_dct[DCTSIZE2];
+          float cur_dct[DCTSIZE2];
+          raw_dct[0] =
+              128.0f + static_cast<float>(raw_cblock[0]) * (1.0f / 128.0f);
+          cur_dct[0] =
+              128.0f + static_cast<float>(cblock[0]) *
+                           (static_cast<float>(qtable->quantval[0]) * 0.125f);
+          for (int z = 1; z < DCTSIZE2; ++z) {
+            int k = kJPEGNaturalOrder[z];
+            raw_dct[k] = static_cast<float>(raw_cblock[z]) * (1.0f / 128.0f);
+            cur_dct[k] = static_cast<float>(cblock[z]) *
+                         (static_cast<float>(qtable->quantval[k]) * 0.125f);
+          }
+          HWY_ALIGN float orig_px[DCTSIZE2];
+          HWY_ALIGN float rec_px[DCTSIZE2];
+          SeparableIdctFromNatural(raw_dct, orig_px);
+          SeparableIdctFromNatural(cur_dct, rec_px);
+
+          bool has_left = (bx > 0 && prev_col_valid);
+          bool has_top = (by > 0 && prev_row_valid[bx] != 0);
+          if (has_left || has_top) {
+            RefineGradientSeamBlock(
+                orig_px, rec_px, cblock, qtable->quantval, prices[tbl], weights,
+                base_lambda * lambda_scale, has_left, prev_col_rec_right,
+                prev_col_orig_right, has_top, &prev_row_rec_bot[bx * 8],
+                &prev_row_orig_bot[bx * 8], /*seam_weight=*/3.5f);
+          }
+          for (int y = 0; y < 8; ++y) {
+            prev_col_rec_right[y] = rec_px[y * 8 + 7];
+            prev_col_orig_right[y] = orig_px[y * 8 + 7];
+          }
+          for (int x = 0; x < 8; ++x) {
+            cur_row_rec_bot[bx * 8 + x] = rec_px[7 * 8 + x];
+            cur_row_orig_bot[bx * 8 + x] = orig_px[7 * 8 + x];
+          }
+          prev_col_valid = true;
+          cur_row_valid[bx] = 1;
+        } else {
+          prev_col_valid = false;
         }
       }
+      prev_row_rec_bot.swap(cur_row_rec_bot);
+      prev_row_orig_bot.swap(cur_row_orig_bot);
+      prev_row_valid.swap(cur_row_valid);
     }
   }
 }
